@@ -117,8 +117,8 @@ impl Default for AppState {
             theme: ThemeChoice::Dark,
             font_scale: 1.0,
             code_language: CodeLanguage::default(),
-            sidebar_width: 320.0,
-            outline_width: 220.0,
+            sidebar_width: 300.0,
+            outline_width: 200.0,
             show_outline: true,
             sidebar_tab: "contents".to_owned(),
             search_all_packages: true,
@@ -167,10 +167,13 @@ impl AppState {
     }
 
     /// Remember the last topic of a content set.
-    pub fn remember_topic(&mut self, source: &str, topic_id: &str) {
+    ///
+    /// The title is stored too: history rows are labelled with it, and an empty title used to
+    /// leave the Favorites pane listing blank, unclickable-looking rows.
+    pub fn remember_topic(&mut self, source: &str, topic_id: &str, title: &str) {
         self.last_topic
             .insert(source.to_owned(), topic_id.to_owned());
-        self.add_history(source, topic_id, "");
+        self.add_history(source, topic_id, title);
     }
 
     /// Add a history entry (deduplicated by topic, newest first).
@@ -286,6 +289,16 @@ mod tests {
     }
 
     #[test]
+    fn history_keeps_the_topic_title() {
+        let mut state = AppState::default();
+        state.remember_topic("a.mshc", "intro", "Introduction to Lucid");
+        let history = state.history_for("a.mshc");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].title, "Introduction to Lucid");
+        assert_eq!(state.last_topic.get("a.mshc").map(String::as_str), Some("intro"));
+    }
+
+    #[test]
     fn history_is_newest_first_and_bounded() {
         let mut state = AppState::default();
         for index in 0..250 {
@@ -303,7 +316,7 @@ mod tests {
         let mut state = AppState::default();
         state.touch_recent("book.mshc");
         state.toggle_bookmark("book.mshc", "Id", "Title");
-        state.remember_topic("book.mshc", "Id");
+        state.remember_topic("book.mshc", "Id", "Title");
         state.theme = ThemeChoice::Light;
         let json = serde_json::to_vec(&state).expect("serialize");
         let restored: AppState = serde_json::from_slice(&json).expect("deserialize");

@@ -154,6 +154,7 @@ pub fn parse_document(html: &str) -> Document {
         outline: Vec::new(),
         snippet_group: None,
         depth: 0,
+        skip_child: None,
     };
     let language = arena
         .find_first(arena.root, &|a, id| a.name(id) == Some("html"))
@@ -418,6 +419,8 @@ struct Convert<'a> {
     outline: Vec<OutlineEntry>,
     snippet_group: Option<String>,
     depth: usize,
+    /// A child to skip while converting (see [`Convert::nested_except`]).
+    skip_child: Option<NodeId>,
 }
 
 /// Elements that are never rendered from a topic body.
@@ -511,8 +514,13 @@ impl<'a> Convert<'a> {
         let mut out: Vec<Block> = Vec::new();
         let mut pending: Vec<Inline> = Vec::new();
         for child in self.arena.children(node).to_vec() {
+            if Some(child) == self.skip_child {
+                continue;
+            }
             if self.arena.is_text(child) {
-                let text = normalize_ws(self.arena.text(child).unwrap_or(""));
+                // Edge spaces are kept: `</b> — the…` and `from <code>x</code> tags` must not
+                // glue together. `flush` trims the paragraph's own edges afterwards.
+                let text = collapse_ws(self.arena.text(child).unwrap_or(""));
                 if !text.is_empty() {
                     pending.push(Inline::Text(text));
                 }
@@ -580,25 +588,28 @@ impl<'a> Convert<'a> {
             "collapsiblearea" => Some(vec![self.collapsible(id, None)]),
             "inheritedmember" => Some(vec![self.collapsible(id, Some("Inherited Members"))]),
             "a" => {
-                // Anchor-only `<a name="x">` / `<a id="x"></a>`
+                // Only the two *positional* forms are blocks here: `<a name="x">` /
+                // `<a id="x"></a>` markers. A link with text belongs in the running text —
+                // returning a paragraph for those used to split sentences in three.
                 let anchor = self
                     .arena
                     .attr(id, "name")
                     .or_else(|| self.arena.id_attr(id))
                     .map(|s| s.to_owned())
                     .filter(|s| !s.is_empty());
-                let inlines = self.inlines(id);
-                let text = inline_text(&inlines);
-                if let Some(anchor) = anchor {
-                    self.note_anchor(&anchor);
-                    if text.trim().is_empty() {
-                        return Some(vec![Block::Anchor(anchor)]);
+                let text = normalize_ws(&self.arena.subtree_text(id, true));
+                match anchor {
+                    Some(anchor) => {
+                        self.note_anchor(&anchor);
+                        if text.trim().is_empty() {
+                            Some(vec![Block::Anchor(anchor)])
+                        } else {
+                            None
+                        }
                     }
+                    None if text.trim().is_empty() => Some(Vec::new()),
+                    None => None,
                 }
-                if text.trim().is_empty() {
-                    return Some(Vec::new());
-                }
-                Some(vec![Block::Paragraph { inlines }])
             }
             "div" | "center" | "section" | "article" | "aside" | "main" | "figure"
             | "figcaption" | "address" | "fieldset" | "details" | "span" => {
@@ -660,9 +671,16 @@ impl<'a> Convert<'a> {
     }
 
     fn nested(&mut self, id: NodeId) -> Vec<Block> {
+        self.nested_except(id, None)
+    }
+
+    /// [`Convert::nested`] while skipping one child (used to drop a note's label node).
+    fn nested_except(&mut self, id: NodeId, skip: Option<NodeId>) -> Vec<Block> {
+        let previous = std::mem::replace(&mut self.skip_child, skip);
         self.depth += 1;
         let blocks = self.blocks(id);
         self.depth -= 1;
+        self.skip_child = previous;
         blocks
     }
 
@@ -838,28 +856,24 @@ impl<'a> Convert<'a> {
 
     fn note(&mut self, id: NodeId) -> Block {
         // Label: `<span class="label">Note</span>` or the header cell of the inner table.
-        let label = self
-            .arena
-            .find_first(id, &|a, n| {
-                a.name(n) == Some("span") && a.has_class(n, "label")
-            })
+        let label_node = self.arena.find_first(id, &|a, n| {
+            (a.name(n) == Some("span") && a.has_class(n, "label"))
+                || (a.name(n) == Some("th") && !a.subtree_text(n, true).trim().is_empty())
+        });
+        let label = label_node
             .map(|n| normalize_ws(&self.arena.subtree_text(n, true)))
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                self.arena
-                    .find_first(id, &|a, n| a.name(n) == Some("th"))
-                    .map(|n| normalize_ws(&self.arena.subtree_text(n, true)))
-                    .filter(|s| !s.is_empty())
-            });
+            .filter(|s| !s.is_empty());
 
-        // Content: the body cell of the inner table when it is a callout table.
+        // Content: the body cell of a callout table, else the element itself. The node that
+        // supplied the label is skipped, so `Note` is not printed twice.
         let body_cell = self.arena.find_first(id, &|a, n| {
             a.name(n) == Some("td") && !a.subtree_text(n, true).trim().is_empty()
         });
-        let blocks = match body_cell {
-            Some(cell) if self.arena.name(id) != Some("td") => self.nested(cell),
-            _ => self.nested(id),
+        let (content_node, skip) = match body_cell {
+            Some(cell) if self.arena.name(id) != Some("td") => (cell, None),
+            _ => (id, label_node),
         };
+        let blocks = self.nested_except(content_node, skip);
         Block::Note { label, blocks }
     }
 
@@ -1199,6 +1213,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn inline_runs_keep_their_separating_spaces_at_block_level() {
+        // Regression: block-level text used to be trimmed, glueing `Contents— the…` and
+        // `fromMicrosoft.Help.TocParenttags` together in the reader.
+        let doc = parse_document(
+            "<ul><li><b>Contents</b> — the table of contents, built from <code>Microsoft.Help.TocParent</code> tags.</li></ul>",
+        );
+        let text = blocks_text(&doc.blocks);
+        assert!(text.contains("Contents — the table of contents"), "{text}");
+        assert!(text.contains("from Microsoft.Help.TocParent tags"), "{text}");
+        assert!(!text.contains("Contents—"));
+        assert!(!text.contains("fromMicrosoft"));
+    }
+
+    #[test]
+    fn paragraphs_still_trim_their_edges() {
+        let doc = parse_document("<p>\n   Hello <b>there</b>.\n</p>");
+        assert_eq!(blocks_text(&doc.blocks).trim(), "Hello there.");
+    }
+
+    #[test]
     fn basic_structure() {
         let doc = parse_document(
             r#"<html><body>
@@ -1317,6 +1351,52 @@ End Sub</CodeSnippet>
         assert!(!doc.text.contains("copyright"));
         assert!(!doc.text.contains("var x"));
         assert!(doc.text.contains("Real content"));
+    }
+
+    #[test]
+    fn a_link_with_text_stays_inside_its_sentence() {
+        // Regression: the `<a>` used to become its own paragraph, splitting
+        // "…highlighting. See" / "the details below" / "." into three lines.
+        let doc = parse_document(
+            "<ul><li><b>Search</b> — ranked full-text search with highlighting.\n      See <a href=\"#details\">the details below</a>.</li></ul>",
+        );
+        let item = match &doc.blocks[0] {
+            Block::List { items, .. } => items[0].clone(),
+            other => panic!("expected a list, got {other:?}"),
+        };
+        assert_eq!(item.len(), 1, "one paragraph, not three: {item:?}");
+        let text = blocks_text(&item);
+        assert!(text.contains("See the details below."), "{text}");
+    }
+
+    #[test]
+    fn note_labels_are_not_repeated_in_the_body() {
+        // Inline callout (Help Viewer writes `<span class="label">Note</span>` in the body).
+        let doc = parse_document(
+            "<div class=\"alert\"><span class=\"label\">Note</span> Mind the gap.</div>",
+        );
+        match &doc.blocks[0] {
+            Block::Note { label, blocks } => {
+                assert_eq!(label.as_deref(), Some("Note"));
+                let text = blocks_text(blocks);
+                assert_eq!(text.trim(), "Mind the gap.");
+            }
+            other => panic!("expected a note, got {other:?}"),
+        }
+        // Table callout: the header cell carries the label, the body cell the text.
+        let doc = parse_document(
+            "<div class=\"alert\"><table><tr><th><strong>Tip </strong></th></tr>\
+             <tr><td><p>Use Ctrl+K.</p></td></tr></table></div>",
+        );
+        match &doc.blocks[0] {
+            Block::Note { label, blocks } => {
+                assert_eq!(label.as_deref(), Some("Tip"));
+                let text = blocks_text(blocks);
+                assert_eq!(text.trim(), "Use Ctrl+K.");
+                assert!(!text.contains("Tip"));
+            }
+            other => panic!("expected a note, got {other:?}"),
+        }
     }
 
     #[test]

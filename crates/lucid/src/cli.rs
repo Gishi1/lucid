@@ -20,6 +20,8 @@ lucid — read and search MSHC (Microsoft Help Container) documentation
 
 USAGE:
     lucid [<path>] [--topic <id>] [--search <term>] [--f1 <keyword>] [--no-index]
+          [--pane <name>] [--theme <name>] [--size <WxH>] [--no-maximize]
+          [--screenshot <png>] [--frames <n>]
     lucid info <path>
     lucid toc <path> [--depth N]
     lucid search <path> <query> [--limit N] [--json]
@@ -33,6 +35,12 @@ OPTIONS:
     --f1 <keyword>     resolve an F1 keyword and open that topic
     --no-index         do not build or load the ranked search index
     --limit <n>        maximum results for `search` (default 20)
+    --pane <name>      start in this pane: contents | index | search | favorites
+    --theme <name>     dark | light (overrides the saved preference)
+    --size <WxH>       open the window at exactly this size (windowed, not maximized)
+    --no-maximize      start windowed instead of maximized (the default)
+    --screenshot <png> write a PNG of the window once the package is loaded, then exit
+    --frames <n>       frames to draw before the screenshot (default 6)
     --json             machine-readable output for `search` and `info`
     --depth <n>        maximum TOC depth for `toc`
     -o, --out <dir>    output directory for `extract`
@@ -96,7 +104,16 @@ fn positionals<'a>(args: &'a [String], value_flags: &[&str]) -> Vec<&'a str> {
     out
 }
 
-const GUI_VALUE_FLAGS: &[&str] = &["--topic", "--search", "--f1"];
+const GUI_VALUE_FLAGS: &[&str] = &[
+    "--topic",
+    "--search",
+    "--f1",
+    "--size",
+    "--screenshot",
+    "--frames",
+    "--pane",
+    "--theme",
+];
 const SEARCH_VALUE_FLAGS: &[&str] = &["--limit"];
 const TOC_VALUE_FLAGS: &[&str] = &["--depth"];
 const EXTRACT_VALUE_FLAGS: &[&str] = &["-o", "--out"];
@@ -136,7 +153,58 @@ fn cmd_gui(args: &[String]) -> Result<ExitCode, CliError> {
     let search = value_of(args, &["--search"]);
     let f1 = value_of(args, &["--f1"]);
     let no_index = flag(args, &["--no-index"]);
-    app::run(path, topic, search, f1, no_index).map_err(CliError::Failed)
+    let size = match value_of(args, &["--size"]) {
+        Some(value) => Some(parse_size(&value)?),
+        None => None,
+    };
+    let view = app::ViewOptions {
+        size,
+        // An explicit size means "leave the window alone"; otherwise start maximized.
+        maximized: size.is_none() && !flag(args, &["--no-maximize"]),
+        screenshot: value_of(args, &["--screenshot"]).map(PathBuf::from),
+        frames: value_of(args, &["--frames"])
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(6),
+    };
+    let pane = match value_of(args, &["--pane"]) {
+        Some(name) => Some(app::pane_from_name(&name).ok_or_else(|| {
+            CliError::Usage(format!(
+                "`{name}` is not a pane (contents, index, search, favorites)"
+            ))
+        })?),
+        None => None,
+    };
+    let theme = value_of(args, &["--theme"]);
+    if let Some(theme) = theme.as_deref() {
+        if !theme.eq_ignore_ascii_case("dark") && !theme.eq_ignore_ascii_case("light") {
+            return Err(CliError::Usage(format!(
+                "`{theme}` is not a theme (dark or light)"
+            )));
+        }
+    }
+    let startup = app::Startup { pane, theme };
+    app::run(path, topic, search, f1, no_index, view, startup).map_err(CliError::Failed)
+}
+
+/// Parse a `WIDTHxHEIGHT` window size.
+fn parse_size(value: &str) -> Result<[f32; 2], CliError> {
+    let (width, height) = value
+        .split_once(['x', 'X', '×'])
+        .ok_or_else(|| CliError::Usage(format!("expected a size like 1280x800, got `{value}`")))?;
+    let width: f32 = width
+        .trim()
+        .parse()
+        .map_err(|_| CliError::Usage(format!("`{value}` is not a valid size")))?;
+    let height: f32 = height
+        .trim()
+        .parse()
+        .map_err(|_| CliError::Usage(format!("`{value}` is not a valid size")))?;
+    if width < 320.0 || height < 240.0 {
+        return Err(CliError::Usage(format!(
+            "`{value}` is too small for the layout (minimum 320x240)"
+        )));
+    }
+    Ok([width, height])
 }
 
 fn open(path: &Path) -> Result<DocSet, CliError> {
@@ -359,8 +427,10 @@ fn cmd_search(args: &[String]) -> Result<ExitCode, CliError> {
         );
     }
     println!(
-        "{bold}{} result(s) in {} µs{reset}",
-        results.total_matched, results.took_us
+        "{bold}{} result{} in {} µs{reset}",
+        results.total_matched,
+        if results.total_matched == 1 { "" } else { "s" },
+        results.took_us
     );
     for (rank, hit) in results.hits.iter().enumerate() {
         println!(

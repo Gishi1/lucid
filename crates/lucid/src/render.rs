@@ -308,7 +308,9 @@ impl<'a> Renderer<'a> {
                 let colour = theme::WARN;
                 theme::note_frame(ui.ctx(), colour).show(ui, |ui| {
                     ui.horizontal_top(|ui| {
-                        ui.label(RichText::new("ⓘ").color(colour).strong());
+                        // A pin rather than "ⓘ": U+24D8 is not in the bundled fonts and was
+                        // rendering as a box in every callout (see docs/DESIGN.md §6).
+                        ui.label(RichText::new("📌").color(colour).strong());
                         ui.vertical(|ui| {
                             if let Some(label) = label {
                                 ui.label(RichText::new(label).strong().color(colour));
@@ -391,17 +393,30 @@ impl<'a> Renderer<'a> {
             .iter()
             .map(|row| row.cells.iter().map(|cell| cell.colspan.max(1) as usize).sum())
             .max()
-            .unwrap_or(1);
+            .unwrap_or(1)
+            .max(1);
+        let widths = self.column_widths(ui, table, columns);
+        let spacing = 12.0;
         let id = format!("table:{}:{}", self.key, table.rows.len());
         egui::Grid::new(id)
             .striped(true)
             .num_columns(columns)
-            .spacing(Vec2::new(12.0, 6.0))
+            .spacing(Vec2::new(spacing, 6.0))
             .show(ui, |ui| {
                 for (row_index, row) in table.rows.iter().enumerate() {
                     let is_header = row.is_header || row_index < table.header_rows;
+                    let mut column = 0usize;
                     for cell in &row.cells {
-                        ui.vertical(|ui| {
+                        let span = (cell.colspan.max(1) as usize).min(columns - column.max(1) + 1);
+                        let cell_width = widths[column..(column + span).min(columns)]
+                            .iter()
+                            .sum::<f32>()
+                            + spacing * span.saturating_sub(1) as f32;
+                        column += span;
+                        // A fixed width per cell is how a `Grid` gets sane column widths:
+                        // without it every column collapses to its narrowest word.
+                        ui.scope(|ui| {
+                            ui.set_width(cell_width.max(24.0));
                             if is_header {
                                 let strong = ui.visuals().strong_text_color();
                                 ui.style_mut().visuals.override_text_color = Some(strong);
@@ -410,14 +425,77 @@ impl<'a> Renderer<'a> {
                                 self.block(ui, block, 1);
                             }
                         });
-                        // `colspan` keeps the grid aligned (rowspan is not modelled).
-                        for _ in 1..cell.colspan.max(1) {
+                        // `rowspan` is not modelled; padding keeps the columns aligned.
+                        for _ in 1..span {
                             ui.label(" ");
                         }
                     }
                     ui.end_row();
                 }
             });
+    }
+
+    /// Column widths for a table: as wide as the widest cell, scaled down to fit.
+    fn column_widths(&self, ui: &Ui, table: &Table, columns: usize) -> Vec<f32> {
+        const MIN_COLUMN: f32 = 56.0;
+        const MAX_FRACTION: f32 = 0.6;
+        let font = FontId::proportional(14.5 * self.scale);
+        let mut widths = vec![MIN_COLUMN; columns];
+
+        for row in &table.rows {
+            let mut column = 0usize;
+            for cell in &row.cells {
+                let span = (cell.colspan.max(1) as usize).min(columns - column.max(1) + 1);
+                if span == 0 {
+                    continue;
+                }
+                // Measure the widest *line* of the cell: content wraps, so the longest line
+                // is a good estimate of what the column needs.
+                let text = lucid_mshc::model::blocks_text(&cell.blocks);
+                let longest = text
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .max_by_key(|line| line.chars().count())
+                    .unwrap_or("");
+                if !longest.is_empty() {
+                    let measured = ui
+                        .fonts(|fonts| {
+                            fonts
+                                .layout_no_wrap(
+                                    longest.to_owned(),
+                                    font.clone(),
+                                    ui.visuals().text_color(),
+                                )
+                                .rect
+                                .width()
+                        })
+                        .max(MIN_COLUMN);
+                    let per_column = measured / span as f32;
+                    for offset in 0..span {
+                        if column + offset < columns {
+                            widths[column + offset] = widths[column + offset].max(per_column);
+                        }
+                    }
+                }
+                column += span;
+            }
+        }
+
+        let spacing = 12.0 * columns.saturating_sub(1) as f32;
+        let available = (ui.available_width() - spacing).max(columns as f32 * 32.0);
+        // No single column may starve the others.
+        for width in widths.iter_mut() {
+            *width = width.min(available * MAX_FRACTION);
+        }
+        let total: f32 = widths.iter().sum();
+        if total > available {
+            let factor = available / total;
+            for width in widths.iter_mut() {
+                *width = (*width * factor).max(MIN_COLUMN);
+            }
+        }
+        widths
     }
 
     fn code(&mut self, ui: &mut Ui, code: &CodeBlock) {

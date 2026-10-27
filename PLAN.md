@@ -185,7 +185,44 @@ Interface stability: `docs/DESIGN.md` §4 (search API) and §5 (forge CLI + pack
     by hand), cross-checking a package in Microsoft Help Viewer on Windows (impossible here),
     syntax highlighting for code snippets, `.cab`/CHM import, and packaging (Nix flake/deb).
 
-- **S1** — repo created; format research done (MS Help Viewer SDK content-metadata reference,
+- **S3** — GUI layout verification pass (the "make it maximized and check the layouts"
+  session). What changed and why:
+  - **Screenshot mode.** `--screenshot <png>` + `--size WxH` + `--frames N` draw the window
+    and write a PNG through `ViewportCommand::Screenshot`, so layouts are checked from
+    images instead of guesses; `--pane`/`--theme` place each pane in the state under test.
+    `--maximized` is the default; `EFRAME_SCREENSHOT_TO` needs eframe's `__screenshot`
+    feature, so the app writes its own PNG with `image`.
+  - **Layout defects the screenshots found** (each fixed): toolbar overflowed/overlapped at
+    900×600 (now two rows, search on its own full-width row); the document column ran to
+    ~170 characters on a 2560 px screen (now a 1120 px centred card — the first attempt, a
+    horizontal layout, let the frame shrink to 200 px and pushed the body text out of it);
+    the outline pane squeezed the document below 1080 px (now auto-hides, button explains
+    why); tables collapsed to one word per column (`Grid` now gets measured cell widths that
+    sum to the available width); the outline repeated the H1 that repeated the tab title;
+    the breadcrumb repeated the title on TOC roots; the status bar said "single package ·
+    1 package" and repeated the index counters; zoom buttons were reversed in the RTL
+    layout; a leading H1 and the note label appeared twice.
+  - **Model bugs found while reading the rendered text**: block-level text was trimmed so
+    spaces around `<b>`/`<code>` vanished ("Contents— the…", "fromMicrosoft.Help…"); an
+    `<a>` with text became its own paragraph, splitting sentences; callout labels were
+    printed twice. All three have regression tests in `lucid-mshc::model`.
+  - **Real UI bugs the panes exposed**: two `ScrollArea`s in Favorites shared an auto id and
+    egui painted "First/Second use of ScrollArea ID 7180" in red over the pane (all lists
+    now have explicit `id_salt`s); history rows were recorded with an empty title, so
+    "History (1)" listed nothing (now stores the title; regression test); empty lists
+    reserved 220 px of blank space instead of saying "no bookmarks yet".
+  - **Missing glyphs**: `▾ ▸ ▲ ▼ ✕ ⓘ ⌕` are not in egui's bundled fonts and rendered as
+    boxes in the tree, tab close buttons, find bar and every callout. A throwaway
+    `glyph_probe` example rendered candidates and the UI now uses only verified characters
+    (`⏷/⏵`, `✖`, `📌`, `🔍`); the supported sets are listed in DESIGN §6.2. Probe deleted.
+  - **Contrast**: the light theme's muted text was blended *towards* the background (1.3:1);
+    both themes now use fixed muted/strong colours, and `selection.stroke.color` (which egui
+    also uses as the text colour of a selected label) was accent-on-accent at ~3:1 — both
+    are now unit-tested with WCAG contrast ratios over the composited selection pill.
+  - **Verification:** screenshots at 900×600, 1280×800, 1600×900, 1920×1080 and 2560×1368
+    (maximized), dark and light, every pane; `cargo test --workspace` → 230 tests green;
+    zero-warning build.
+- - **S1** — repo created; format research done (MS Help Viewer SDK content-metadata reference,
   10Tec product pages, `andlabs/mshc2devhelp` reference parser: topics are `.htm` with
   `Microsoft.Help.Id|TocParent|TocOrder|Keywords|F1`, assets referenced with **uppercase**
   paths while zip entries are lowercase, non-topic parts start with `ic`); workspace +

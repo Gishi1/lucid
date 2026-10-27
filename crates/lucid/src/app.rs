@@ -24,9 +24,17 @@ use crate::render::{AssetCache, FindPattern, FindState, RenderAction, Renderer, 
 use crate::state::{AppState, CodeLanguage, ThemeChoice};
 use crate::theme;
 
+/// Below this window width the outline pane hides itself (the document needs the room).
+const OUTLINE_MIN_WIDTH: f32 = 1080.0;
+
+/// Widest text column. On a 2560 px display an uncapped column runs to ~170 characters per
+/// line, which is uncomfortable to read; capping it centres the text instead.
+const MAX_DOCUMENT_WIDTH: f32 = 1120.0;
+
 /// Which browser pane is showing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SidebarTab {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SidebarTab {
+    #[default]
     Contents,
     Index,
     Search,
@@ -94,6 +102,59 @@ enum Action {
     CloseDialog,
     OpenDialogFile(PathBuf),
     ClearKeywordSelection,
+}
+
+/// What the command line asked for on top of the saved state.
+#[derive(Debug, Clone, Default)]
+pub struct Startup {
+    /// Pane to show first (`--pane contents|index|search|favorites`).
+    pub pane: Option<SidebarTab>,
+    /// Theme override (`--theme dark|light`).
+    pub theme: Option<String>,
+}
+
+/// Parse a pane name from the command line.
+pub fn pane_from_name(name: &str) -> Option<SidebarTab> {
+    match name.to_ascii_lowercase().as_str() {
+        "contents" | "toc" => Some(SidebarTab::Contents),
+        "index" | "keywords" => Some(SidebarTab::Index),
+        "search" => Some(SidebarTab::Search),
+        "favorites" | "bookmarks" => Some(SidebarTab::Favorites),
+        _ => None,
+    }
+}
+
+/// How the window should open (and, for verification runs, what should be captured).
+#[derive(Debug, Clone)]
+pub struct ViewOptions {
+    /// Exact window size; `None` means "use the screen" (maximized).
+    pub size: Option<[f32; 2]>,
+    /// Open maximized (default: yes — a help viewer is read full screen).
+    pub maximized: bool,
+    /// Write a PNG of the window once the content set is loaded, then exit.
+    pub screenshot: Option<PathBuf>,
+    /// Extra frames to draw before taking the screenshot (lets panels settle).
+    pub frames: u32,
+}
+
+impl Default for ViewOptions {
+    fn default() -> Self {
+        ViewOptions {
+            size: None,
+            maximized: true,
+            screenshot: None,
+            frames: 6,
+        }
+    }
+}
+
+/// Pending screenshot request.
+#[derive(Debug, Clone)]
+struct ScreenshotPlan {
+    path: PathBuf,
+    frames_to_wait: u32,
+    frames_drawn: u32,
+    requested: bool,
 }
 
 /// In-app file browser (no native dialog dependency).
@@ -231,12 +292,15 @@ pub struct LucidApp {
     status: String,
     toast: Option<(String, f64)>,
     theme_applied: Option<(ThemeChoice, i32)>,
+    /// Pane requested on the command line (`--pane`).
+    pending_pane: Option<SidebarTab>,
     /// Pending topic from the command line (`--topic`, `--f1`).
     pending_topic: Option<String>,
     pending_keyword: Option<String>,
     pending_search: Option<String>,
     focus_search: bool,
     show_about: bool,
+    screenshot: Option<ScreenshotPlan>,
 }
 
 impl LucidApp {
@@ -248,8 +312,23 @@ impl LucidApp {
         topic: Option<String>,
         f1: Option<String>,
         search: Option<String>,
+        view: ViewOptions,
+        startup: Startup,
     ) -> Self {
         // Read what we need out of the persisted state before it is moved into the struct.
+        // `--theme` overrides the saved preference for this session (and is remembered).
+        let mut state = state;
+        if let Some(theme) = startup.theme.as_deref() {
+            state.theme = if theme.eq_ignore_ascii_case("light") {
+                ThemeChoice::Light
+            } else {
+                ThemeChoice::Dark
+            };
+        }
+        state.sidebar_tab = startup
+            .pane
+            .map(|pane| pane.id().to_owned())
+            .unwrap_or_else(|| state.sidebar_tab.clone());
         let sidebar_tab = SidebarTab::from_id(&state.sidebar_tab);
         let mut app = LucidApp {
             state,
@@ -283,11 +362,18 @@ impl LucidApp {
             status: String::new(),
             toast: None,
             theme_applied: None,
+            pending_pane: startup.pane,
             pending_topic: topic,
             pending_keyword: f1,
             pending_search: search,
             focus_search: false,
             show_about: false,
+            screenshot: view.screenshot.clone().map(|path| ScreenshotPlan {
+                path,
+                frames_to_wait: view.frames,
+                frames_drawn: 0,
+                requested: false,
+            }),
         };
         theme::apply(&cc.egui_ctx, app.state.theme, app.state.font_scale);
         app.theme_applied = Some((app.state.theme, (app.state.font_scale * 100.0) as i32));
@@ -352,19 +438,21 @@ impl LucidApp {
         self.paths = load::topic_paths(&loaded.set);
         self.quick_entries = quickopen::entries(&loaded.set, &self.paths);
         self.warnings_status(&loaded);
-        self.status = match (&loaded.index, loaded.index_from_cache) {
-            (Some(index), true) => format!(
-                "index loaded from cache ({} topics, {} terms)",
-                index.doc_count(),
-                index.term_count()
+        // The index line in the status bar already shows terms and cache state; keep this
+        // one about the content set itself.
+        let packages = loaded.set.packages.len();
+        let mut status = match loaded.set.kind {
+            lucid_mshc::SourceKind::Package => "single package".to_owned(),
+            lucid_mshc::SourceKind::Folder => format!(
+                "content set · {packages} package{}",
+                if packages == 1 { "" } else { "s" }
             ),
-            (Some(index), false) => format!(
-                "index built ({} topics, {} terms)",
-                index.doc_count(),
-                index.term_count()
-            ),
-            (None, _) => "metadata only (no index)".to_owned(),
+            lucid_mshc::SourceKind::Setup => "setup document".to_owned(),
         };
+        if loaded.index.is_none() {
+            status.push_str(" · no index (--no-index)");
+        }
+        self.status = status;
         self.assets.clear();
         self.tabs.clear();
         self.active_tab = 0;
@@ -406,6 +494,9 @@ impl LucidApp {
         if let Some(query) = self.pending_search.take() {
             self.set_search_query(&query);
             self.sidebar_tab = SidebarTab::Search;
+        }
+        if let Some(pane) = self.pending_pane.take() {
+            self.sidebar_tab = pane;
         }
         ctx.request_repaint();
     }
@@ -512,7 +603,7 @@ impl LucidApp {
         self.session_history.push((key, title.clone()));
         self.history_pos = self.session_history.len();
         if !id.is_empty() {
-            self.state.remember_topic(&self.source_id(), &id);
+            self.state.remember_topic(&self.source_id(), &id, &title);
         }
         self.recompute_find();
     }
@@ -653,7 +744,20 @@ impl LucidApp {
 
     // ------------------------------------------------------------------ drawing
 
+    /// The toolbar: a row of controls plus a full-width search row.
+    ///
+    /// Two rows rather than one because at the minimum window size a single row either
+    /// overflows or squeezes the search box into an unusable width (see the layout checks in
+    /// `docs/DESIGN.md` §6).
     fn toolbar(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        ui.add_space(3.0);
+        self.toolbar_controls(ui, actions);
+        ui.add_space(3.0);
+        self.toolbar_search(ui, actions);
+        ui.add_space(3.0);
+    }
+
+    fn toolbar_controls(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Lucid").strong().size(16.0));
             ui.separator();
@@ -696,35 +800,12 @@ impl LucidApp {
                     if quick.query.is_empty() {
                         "Go to topic (Ctrl+P)".to_owned()
                     } else {
-                        format!("⌕ {}", quick.query)
+                        format!("🔍 {}", quick.query)
                     }
                 })
                 .unwrap_or_else(|| "Go to topic (Ctrl+P)".to_owned());
             if ui.button(quick_label).clicked() {
                 actions.push(Action::Message("quick-open".to_owned()));
-            }
-
-            ui.separator();
-            // Global search box (Ctrl+K focuses it).
-            let width = (ui.available_width() - 260.0).max(180.0);
-            let mut query = self.search_query_cache.clone();
-            let response = ui.add_sized(
-                [width, 24.0],
-                egui::TextEdit::singleline(&mut query)
-                    .hint_text("Search (Ctrl+K) — try: \"phrase\", term*, field:value, -exclude")
-                    .desired_width(width),
-            );
-            if response.changed() {
-                actions.push(Action::SetSearchQuery(query.clone()));
-            }
-            if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
-                if let Some(hit) = self.search_results.hits.first().cloned() {
-                    self.open_hit(&hit);
-                }
-            }
-            if self.focus_search {
-                response.request_focus();
-                self.focus_search = false;
             }
 
             ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
@@ -761,22 +842,34 @@ impl LucidApp {
                     self.state.code_language = language;
                     self.state.save();
                 }
+                let outline_shown = self.outline_visible(ui.ctx());
+                let outline_hint = if self.state.show_outline && !outline_shown {
+                    "The outline is hidden automatically in narrow windows"
+                } else {
+                    "Show the outline of the current topic"
+                };
                 if ui
-                    .selectable_label(self.state.show_outline, "Outline")
-                    .on_hover_text("Show the outline of the current topic")
+                    .selectable_label(outline_shown, "Outline")
+                    .on_hover_text(outline_hint)
                     .clicked()
                 {
                     self.state.show_outline = !self.state.show_outline;
                 }
-                if ui.small_button("−").clicked() {
-                    let scale = (self.current_scale() - 0.1).max(0.8);
-                    actions.push(Action::SetZoom(scale));
-                }
-                if ui.small_button("+").clicked() {
+                // Added in reverse: this is a right-to-left layout, so "+" is added first
+                // to end up on the right of "−".
+                if ui.small_button("+").on_hover_text("Zoom in").clicked() {
                     let scale = (self.current_scale() + 0.1).min(1.8);
                     actions.push(Action::SetZoom(scale));
                 }
-                if ui.small_button("100%").clicked() {
+                if ui.small_button("−").on_hover_text("Zoom out").clicked() {
+                    let scale = (self.current_scale() - 0.1).max(0.8);
+                    actions.push(Action::SetZoom(scale));
+                }
+                if ui
+                    .small_button("⟲")
+                    .on_hover_text("Reset zoom (Ctrl+0)")
+                    .clicked()
+                {
                     actions.push(Action::SetZoom(1.0));
                 }
                 ui.label(
@@ -786,6 +879,28 @@ impl LucidApp {
                 );
             });
         });
+    }
+
+    /// The global search box (Ctrl+K focuses it), always on its own full-width row.
+    fn toolbar_search(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        let mut query = self.search_query_cache.clone();
+        let response = ui.add_sized(
+            [ui.available_width(), 26.0],
+            egui::TextEdit::singleline(&mut query)
+                .hint_text("Search (Ctrl+K) — try: \"phrase\", term*, field:value, -exclude"),
+        );
+        if response.changed() {
+            actions.push(Action::SetSearchQuery(query.clone()));
+        }
+        if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+            if let Some(hit) = self.search_results.hits.first().cloned() {
+                self.open_hit(&hit);
+            }
+        }
+        if self.focus_search {
+            response.request_focus();
+            self.focus_search = false;
+        }
     }
 
     fn search_query(&self) -> String {
@@ -903,7 +1018,7 @@ impl LucidApp {
             ui.add(
                 egui::TextEdit::singleline(&mut self.toc_filter)
                     .hint_text("Filter contents")
-                    .desired_width(ui.available_width() - 90.0),
+                    .desired_width((ui.available_width() - 112.0).max(60.0)),
             );
             if ui.small_button("All").on_hover_text("Expand everything").clicked() {
                 let titles: Vec<String> = self
@@ -928,6 +1043,7 @@ impl LucidApp {
         let mut new_expanded = expanded.clone();
 
         ScrollArea::vertical()
+            .id_salt("toc-list")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for node in &nodes {
@@ -967,7 +1083,9 @@ impl LucidApp {
             if node.children.is_empty() {
                 ui.add_space(16.0);
             } else {
-                let arrow = if is_open { "▾" } else { "▸" };
+                // U+23F7/U+23F5: the small triangles that the bundled fonts actually have
+                // (U+25BE/U+25B8 render as empty boxes). See `docs/DESIGN.md` §6.
+                let arrow = if is_open { "⏷" } else { "⏵" };
                 if ui
                     .add(egui::Button::new(arrow).small().frame(false))
                     .clicked()
@@ -987,6 +1105,9 @@ impl LucidApp {
             }
             if highlight && !filter.is_empty() {
                 text = text.strong().color(theme::ACCENT);
+            }
+            if selected {
+                text = text.color(theme::strong_text(ui.ctx()));
             }
             let response = ui.selectable_label(selected, text);
             if response.clicked() {
@@ -1067,7 +1188,10 @@ impl LucidApp {
             (set.keywords.len(), matches, keys)
         };
         ui.label(
-            RichText::new(format!("{keyword_count} keyword(s)"))
+            RichText::new(format!(
+                "{keyword_count} keyword{}",
+                if keyword_count == 1 { "" } else { "s" }
+            ))
                 .small()
                 .color(theme::muted(ui.ctx())),
         );
@@ -1097,6 +1221,7 @@ impl LucidApp {
         let mut clicked: Option<TopicKey> = None;
         let mut toggled: Option<usize> = None;
         ScrollArea::vertical()
+            .id_salt("index-list")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for (index, keyword, is_f1, key) in &matches {
@@ -1197,7 +1322,8 @@ impl LucidApp {
                 "no results".to_owned()
             } else {
                 format!(
-                    "{total} result(s) in {}",
+                    "{total} result{} in {}",
+                    if total == 1 { "" } else { "s" },
                     if took > 1000 {
                         format!("{:.1} ms", took as f64 / 1000.0)
                     } else {
@@ -1224,6 +1350,7 @@ impl LucidApp {
         let selected = self.search_selected;
         let mut clicked: Option<Hit> = None;
         ScrollArea::vertical()
+            .id_salt("search-results")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for (index, hit) in hits.iter().enumerate() {
@@ -1340,7 +1467,15 @@ impl LucidApp {
         }
         let count: usize = groups.iter().map(|(_, items)| items.len()).sum();
         ui.label(RichText::new(format!("Bookmarks ({count})")).strong());
+        if count == 0 {
+            ui.label(
+                RichText::new("no bookmarks yet — press Ctrl+D to keep a topic here")
+                    .small()
+                    .color(theme::muted(ui.ctx())),
+            );
+        } else {
         ScrollArea::vertical()
+            .id_salt("bookmarks")
             .max_height(220.0)
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -1357,7 +1492,7 @@ impl LucidApp {
                     );
                     for (id, title) in items {
                         ui.horizontal(|ui| {
-                            if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                            if ui.small_button("✖").on_hover_text("Remove").clicked() {
                                 remove = Some(id.clone());
                             }
                             if ui.selectable_label(false, title).clicked() {
@@ -1365,13 +1500,6 @@ impl LucidApp {
                             }
                         });
                     }
-                }
-                if count == 0 {
-                    ui.label(
-                        RichText::new("no bookmarks yet")
-                            .small()
-                            .color(theme::muted(ui.ctx())),
-                    );
                 }
                 if let Some(id) = remove {
                     self.state
@@ -1389,6 +1517,7 @@ impl LucidApp {
                     }
                 }
             });
+        }
 
         ui.separator();
         let history: Vec<(String, String)> = self
@@ -1399,7 +1528,15 @@ impl LucidApp {
             .map(|entry| (entry.topic_id.clone(), entry.title.clone()))
             .collect();
         ui.label(RichText::new(format!("History ({})", history.len())).strong());
+        if history.is_empty() {
+            ui.label(
+                RichText::new("no history yet")
+                    .small()
+                    .color(theme::muted(ui.ctx())),
+            );
+        } else {
         ScrollArea::vertical()
+            .id_salt("history")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for (id, title) in &history {
@@ -1414,6 +1551,15 @@ impl LucidApp {
                     }
                 }
             });
+        }
+    }
+
+    /// Is the outline pane worth its width right now?
+    ///
+    /// The user's preference wins when there is room; in a narrow window the document needs
+    /// the space more than the outline does, and the toolbar button says so.
+    fn outline_visible(&self, ctx: &egui::Context) -> bool {
+        self.state.show_outline && ctx.screen_rect().width() >= OUTLINE_MIN_WIDTH
     }
 
     fn outline_panel(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
@@ -1424,9 +1570,20 @@ impl LucidApp {
             ui.label(RichText::new("—").color(theme::muted(ui.ctx())));
             return;
         };
-        let outline = tab.document.outline.clone();
+        // A leading H1 that just repeats the topic title is noise in the outline.
+        let title = tab.title.clone();
+        let outline: Vec<lucid_mshc::OutlineEntry> = tab
+            .document
+            .outline
+            .iter()
+            .filter(|entry| {
+                !(entry.level == 1 && entry.text.eq_ignore_ascii_case(title.trim()))
+            })
+            .cloned()
+            .collect();
         let key = tab.key;
         ScrollArea::vertical()
+            .id_salt("outline-list")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for entry in &outline {
@@ -1517,7 +1674,7 @@ impl LucidApp {
                             activate = Some(index);
                         }
                         if ui
-                            .small_button("✕")
+                            .small_button("✖")
                             .on_hover_text("Close tab (Ctrl+W)")
                             .clicked()
                         {
@@ -1536,10 +1693,11 @@ impl LucidApp {
         if let Some(index) = close {
             actions.push(Action::CloseTab(index));
         }
-        // Breadcrumb.
+        // Breadcrumb — skipped for TOC roots, where it would only repeat the tab title.
         if let Some(tab) = self.tabs.get(self.active_tab) {
             if let Some(set) = self.set() {
                 let crumbs = set.breadcrumb(tab.key);
+                if crumbs.len() > 1 {
                 ui.horizontal_wrapped(|ui| {
                     for (index, (title, key)) in crumbs.iter().enumerate() {
                         if index > 0 {
@@ -1584,6 +1742,7 @@ impl LucidApp {
                         }
                     });
                 });
+                }
             }
         }
     }
@@ -1627,13 +1786,21 @@ impl LucidApp {
                 .small()
                 .color(theme::muted(ui.ctx())),
             );
-            if ui.small_button("▲").clicked() {
+            if ui
+                .small_button("⏶")
+                .on_hover_text("Previous match (Shift+Enter)")
+                .clicked()
+            {
                 step_back = true;
             }
-            if ui.small_button("▼").clicked() {
+            if ui
+                .small_button("⏷")
+                .on_hover_text("Next match (Enter)")
+                .clicked()
+            {
                 step_forward = true;
             }
-            if ui.small_button("✕").clicked() {
+            if ui.small_button("✖").clicked() {
                 close = true;
             }
         });
@@ -1687,23 +1854,38 @@ impl LucidApp {
             let code_language = self.state.code_language.clone();
             let frame = theme::document_frame(ui.ctx());
             let assets = &mut self.assets;
+            // Reading measure: a centred column instead of lines running the full width of a
+            // 2560 px display. `top_down(Center)` + an explicit width is what makes `Frame`
+            // produce a card of that width (a horizontal layout let the frame shrink to its
+            // content and the text overflow it).
             ScrollArea::vertical()
                 .id_salt(format!("topic-scroll:{}", tab.key))
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    let available = ui.available_width();
+                    let column = available.min(MAX_DOCUMENT_WIDTH);
+                    let inner = (column - 48.0).max(200.0);
+                    ui.with_layout(Layout::top_down(egui::Align::Center), |ui| {
+                    ui.set_max_width(column);
                     frame.show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        let document = tab.document.clone();
-                        let mut renderer = Renderer::new(
-                            set,
-                            tab.key,
-                            assets,
-                            &mut tab.view,
-                            find_pattern,
-                            code_language.clone(),
-                            &mut render_actions,
-                        );
-                        renderer.draw(ui, &document);
+                        ui.set_min_width(inner);
+                        ui.set_max_width(inner);
+                        // The centring above applies to the *card*; inside it everything is
+                        // left-aligned like a normal document.
+                        ui.with_layout(Layout::top_down(egui::Align::Min), |ui| {
+                            let document = tab.document.clone();
+                            let mut renderer = Renderer::new(
+                                set,
+                                tab.key,
+                                assets,
+                                &mut tab.view,
+                                find_pattern,
+                                code_language.clone(),
+                                &mut render_actions,
+                            );
+                            renderer.draw(ui, &document);
+                        });
+                    });
                     });
                     // Resolve pending scroll requests against the freshly recorded positions.
                     let target: Option<f32> = if let Some(anchor) = tab.view.scroll_to_anchor.take()
@@ -1797,6 +1979,7 @@ impl LucidApp {
                 }
                 ui.separator();
                 ScrollArea::vertical()
+                    .id_salt("quick-open")
                     .max_height(320.0)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -1884,6 +2067,7 @@ impl LucidApp {
                 });
                 ui.separator();
                 ScrollArea::vertical()
+                    .id_salt("file-dialog")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         for (name, is_dir) in &dialog.entries {
@@ -1993,7 +2177,7 @@ impl LucidApp {
                 ))
                 .small());
                 ui.separator();
-                ui.label("Keyboard: Ctrl+O open · Ctrl+P go to topic · Ctrl+K search · Ctrl+F find in topic · Ctrl+W close tab · Ctrl+D bookmark · Alt+←/→ history · Ctrl+±  zoom · F5 reindex");
+                ui.label("Keyboard: Ctrl+O open · Ctrl+P go to topic · Ctrl+K search · Ctrl+F find in topic · Ctrl+W close tab · Ctrl+D bookmark · Alt+Left/Right history · Ctrl+±  zoom · F5 reindex");
                 ui.separator();
                 if ui.button("Close").clicked() {
                     close = true;
@@ -2210,6 +2394,52 @@ impl LucidApp {
         }
     }
 
+    /// Screenshot mode: wait for the content set, capture the window, write a PNG, exit.
+    ///
+    /// Used by the layout checks in `docs/DESIGN.md` §6 (and by anyone who wants a picture of
+    /// a package without clicking through it).
+    fn handle_screenshot(&mut self, ctx: &egui::Context) {
+        let captured = ctx.input(|input| {
+            input.events.iter().find_map(|event| match event {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(image) = captured {
+            if let Some(plan) = self.screenshot.take() {
+                match save_png(&plan.path, &image) {
+                    Ok(()) => eprintln!(
+                        "lucid: wrote {} ({}×{})",
+                        plan.path.display(),
+                        image.size[0],
+                        image.size[1]
+                    ),
+                    Err(error) => eprintln!(
+                        "lucid: could not write {}: {error}",
+                        plan.path.display()
+                    ),
+                }
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        let Some(plan) = self.screenshot.as_mut() else {
+            return;
+        };
+        if plan.requested {
+            return;
+        }
+        plan.frames_drawn += 1;
+        // Give the panels a couple of frames to settle after the content set arrives.
+        let ready = (self.loaded.is_some() || self.load_error.is_some())
+            && plan.frames_drawn >= plan.frames_to_wait;
+        if ready {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            plan.requested = true;
+        }
+        ctx.request_repaint();
+    }
+
     fn handle_dropped(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         let dropped: Vec<PathBuf> = ctx.input(|input| {
             input
@@ -2255,11 +2485,9 @@ impl eframe::App for LucidApp {
         self.handle_shortcuts(ctx, &mut actions);
         self.handle_dropped(ctx, &mut actions);
 
-        egui::TopBottomPanel::top("toolbar")
-            .exact_height(38.0)
-            .show(ctx, |ui| {
-                self.toolbar(ui, &mut actions);
-            });
+        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+            self.toolbar(ui, &mut actions);
+        });
         egui::TopBottomPanel::bottom("status")
             .exact_height(26.0)
             .show(ctx, |ui| {
@@ -2272,11 +2500,11 @@ impl eframe::App for LucidApp {
             .show(ctx, |ui| {
                 self.sidebar(ui, &mut actions);
             });
-        if self.state.show_outline {
+        if self.outline_visible(ctx) {
             egui::SidePanel::right("outline")
                 .resizable(true)
                 .default_width(self.state.outline_width)
-                .width_range(160.0..=360.0)
+                .width_range(150.0..=360.0)
                 .show(ctx, |ui| {
                     self.outline_panel(ui, &mut actions);
                 });
@@ -2290,6 +2518,7 @@ impl eframe::App for LucidApp {
         self.about_window(ctx);
         self.toast(ctx);
         self.apply(actions, ctx);
+        self.handle_screenshot(ctx);
     }
 
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
@@ -2423,13 +2652,21 @@ pub fn run(
     search: Option<String>,
     f1: Option<String>,
     no_index: bool,
+    view: ViewOptions,
+    startup: Startup,
 ) -> Result<ExitCode, String> {
     let state = AppState::load();
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Lucid")
+        .with_min_inner_size([900.0, 600.0])
+        .with_maximized(view.maximized);
+    viewport = match view.size {
+        Some([width, height]) => viewport.with_inner_size([width, height]),
+        // A size to fall back to when the window manager ignores the maximized request.
+        None => viewport.with_inner_size([1440.0, 900.0]),
+    };
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 840.0])
-            .with_min_inner_size([900.0, 600.0])
-            .with_title("Lucid"),
+        viewport,
         ..Default::default()
     };
     let result = eframe::run_native(
@@ -2437,9 +2674,30 @@ pub fn run(
         options,
         Box::new(move |cc| {
             Ok(Box::new(LucidApp::new(
-                cc, state, no_index, path, topic, f1, search,
+                cc, state, no_index, path, topic, f1, search, view, startup,
             )))
         }),
     );
     result.map(|_| ExitCode::SUCCESS).map_err(|error| error.to_string())
+}
+
+/// Write an egui screenshot as a PNG.
+fn save_png(path: &std::path::Path, image: &egui::ColorImage) -> std::io::Result<()> {
+    let width = image.size[0] as u32;
+    let height = image.size[1] as u32;
+    let mut bytes = Vec::with_capacity((width * height * 4) as usize);
+    for pixel in &image.pixels {
+        bytes.extend_from_slice(&pixel.to_array());
+    }
+    let buffer = image::RgbaImage::from_raw(width, height, bytes).ok_or_else(|| {
+        std::io::Error::other("screenshot buffer does not match its dimensions")
+    })?;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    buffer
+        .save(path)
+        .map_err(|error| std::io::Error::other(error.to_string()))
 }

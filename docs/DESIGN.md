@@ -366,21 +366,52 @@ at an existing part (case-insensitive); duplicate `Microsoft.Help.Id` reported; 
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ Lucid   [Open ▾] [Recent ▾] [Reload] [Reindex]   ⌕ search…        [☀] [⚙]    │
+│ Lucid  [Open] [Reindex] [Go to topic (Ctrl+P)]   100% ⟲ − + Outline [C#] 🌙 │
+│ [🔍 Search (Ctrl+K) — "phrase", term*, field:value, -exclude______________] │
 ├───────────────┬──────────────────────────────────────────────┬───────────────┤
 │ Contents │ Index │ Search │ Favorites                          │  On this page │
-│  ▾ Guides     │  Guides › Getting started › Installing       │   • Overview  │
+│  ⏵ Guides     │  Guides › Getting started › Installing       │   • Overview  │
 │    · Intro    │  ┌──────────────────────────────────────────┐ │   • Install   │
-│    ▾ Search   │  │ 12 results in 3 ms                       │ │   • Queries   │
+│    ⏷ Search   │  │ 12 results in 3 ms                       │ │   • Queries   │
 │      · Queries│  │ Installing the CLI                       │ │               │
 │               │  │ …copy the binary and run lucid info…     │ │               │
 │ filter: ______│  └──────────────────────────────────────────┘ │               │
 ├───────────────┴──────────────────────────────────────────────┴───────────────┤
-│ Tab1 │ Tab2 │ …                                    breadcrumb · 1/7 · 100%  │
+│ Introduction to Lucid ✖ │ Other topic ✖ │ Close all      bookmark ☆  copy link│
 ├──────────────────────────────────────────────────────────────────────────────┤
-│ demo-help.mshc · 42 topics · index ready (1.2 MB) · 0.9 ms/query              │
+│ demo-help.mshc │ 19 topics │ index 1424 terms (cached) │ single package       │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
+
+The window opens **maximized** (a help viewer is a full-screen reading surface). The
+toolbar is two rows — controls on top, the search box on its own full-width row — because
+at the 900 px minimum width a single row either overflowed or squeezed the search box down
+to an unusable sliver. The status bar never repeats what another element already says
+(the source and topic count on the left, the index state in the middle).
+
+### 6.1 Layout rules
+
+| Rule | Value | Why |
+| --- | --- | --- |
+| Minimum window | 900 × 600 | Below this the panes stop being usable; the window manager enforces it |
+| Outline pane | auto-hidden under 1080 px | The document needs the width more than a 200 px column of headings does; the Outline button stays visible and its tooltip explains why it is off |
+| Sidebar | 300 px default, 220–520 px | Resizable; the search results need the room |
+| Reading measure | 1120 px, centred | Un-capped, a 2560 px display gives ~170-character lines |
+| Toolbar | two rows, auto height | See above |
+| Status bar | one line, ellipsized | Never duplicates the index or pane counters |
+
+### 6.2 Glyph policy
+
+egui bundles three fonts (Ubuntu-Light, NotoEmoji, emoji-icon-font) and a missing glyph is
+painted as an empty box — which is how `▾ ▸ ▲ ▼ ✕ ⓘ ⌕ ← →` all shipped in the first cut.
+Only characters that were *verified* by rendering them are used in the UI:
+
+- **Works:** `★ ☆ ✔ ✖ ▶ ◀ ⏵ ⏷ ⏶ ⏴ ☀ 🌙 ⚠ 📌 🔍 📁 📄 📦 ⟲ ↺ ⬆ ➡ ⬅ ⬇ ⮨ ⮩ ⏏ ● ■ ▪ › · — – … § ± µ ×`
+- **Missing (do not use):** `▾ ▸ ▲ ▼ ✕ ⓘ ⌕ ← → ↑ ↓ ☾ ⏎` and the geometric-shape block
+  (`□ ▫`) generally.
+
+If a new icon is needed, render it with the glyph probe described in `PLAN.md` (S3) instead
+of trusting a Unicode chart.
 
 Panes (left dock, tabs, resizable, remembers width & tab):
 
@@ -428,6 +459,25 @@ lucid search <path> <query> [--limit N]   # ranked results with snippets (pipe-f
 lucid extract <path> -o dir               # unpack topics + assets
 lucid demo <out.mshc>                     # write the demo package
 lucid --version
+
+GUI-only flags:
+  --pane <name>        start in contents | index | search | favorites
+  --theme <name>       dark | light (overrides the saved preference for this session)
+  --size <WxH>         exact window size, e.g. 1280x800 (implies windowed, not maximized)
+  --no-maximize        start windowed at the fallback size (1440x900)
+  --screenshot <png>   draw the window, write a PNG, exit (layout verification)
+  --frames <n>         frames to draw before the screenshot (default 6)
+```
+
+`--screenshot` exists so the layout can be checked without a human at the keyboard: the
+example below writes five images, one per window size, and the contrast/layout audit in
+`PLAN.md` S3 runs over them.
+
+```
+for size in 900x600 1280x800 1920x1080; do
+  lucid testdata/demo-help.mshc --size $size --screenshot /tmp/lucid-$size.png
+done
+lucid testdata/demo-help.mshc --screenshot /tmp/lucid-maximized.png
 ```
 
 Exit codes: 0 ok, 1 IO/format error, 2 bad usage, 3 topic/keyword not found.

@@ -103,6 +103,8 @@ open topic.
 
 ```
 lucid [<path>] [--topic <id>] [--search <term>] [--f1 <keyword>] [--no-index]
+             [--pane contents|index|search|favorites] [--theme dark|light]
+             [--size WxH] [--no-maximize] [--screenshot out.png] [--frames N]
 lucid info <path> [--json]
 lucid toc <path> [--depth N]
 lucid search <path> <query> [--limit N] [--json]
@@ -114,6 +116,15 @@ lucid --version | --help
 Exit codes: `0` success, `1` I/O or format error, `2` usage, `3` nothing found.
 `lucid --topic <id>` and `lucid --f1 <keyword>` are the hooks for context-sensitive help
 (`F1`) in your own application.
+
+The window opens maximized; `--size 1280x800` pins an exact size instead. `--screenshot`
+renders the GUI, writes a PNG and exits, which is how the layouts are checked at 900×600
+through 2560×1368 without a human at the keyboard:
+
+```
+lucid testdata/demo-help.mshc --size 900x600 --screenshot /tmp/lucid-900.png
+lucid testdata/demo-help.mshc --theme light --pane search --search bm25 --screenshot /tmp/lucid-search.png
+```
 
 ## Format support
 

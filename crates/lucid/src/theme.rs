@@ -71,7 +71,10 @@ fn dark_visuals() -> egui::Visuals {
     visuals.override_text_color = Some(text);
     visuals.hyperlink_color = ACCENT;
     visuals.selection.bg_fill = ACCENT.gamma_multiply(0.35);
-    visuals.selection.stroke = Stroke::new(1.0, ACCENT);
+    // `selection.stroke.color` is also the text colour of a *selected* selectable label
+    // (tabs, chips, list rows), so it must contrast with `selection.bg_fill` — an accent
+    // colour here produced blue-on-blue labels at ~3:1.
+    visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(0xF2, 0xF4, 0xF9));
     visuals.window_stroke = Stroke::new(1.0, line);
 
     visuals.widgets.noninteractive.bg_fill = surface;
@@ -107,7 +110,8 @@ fn light_visuals() -> egui::Visuals {
     let bg = Color32::from_rgb(0xFF, 0xFF, 0xFF);
     let surface = Color32::from_rgb(0xF7, 0xF8, 0xFA);
     let elevated = Color32::from_rgb(0xEF, 0xF1, 0xF5);
-    let line = Color32::from_rgb(0xD7, 0xDC, 0xE4);
+    // Chrome lines: visible without shouting (the previous #D7DCE4 was ~1.5:1).
+    let line = Color32::from_rgb(0xC5, 0xCD, 0xD9);
     let text = Color32::from_rgb(0x1B, 0x1F, 0x27);
 
     visuals.panel_fill = surface;
@@ -117,7 +121,7 @@ fn light_visuals() -> egui::Visuals {
     visuals.override_text_color = Some(text);
     visuals.hyperlink_color = Color32::from_rgb(0x1F, 0x5F, 0xD1);
     visuals.selection.bg_fill = ACCENT.gamma_multiply(0.25);
-    visuals.selection.stroke = Stroke::new(1.0, ACCENT);
+    visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(0x12, 0x16, 0x1C));
     visuals.window_stroke = Stroke::new(1.0, line);
 
     visuals.widgets.noninteractive.bg_fill = surface;
@@ -200,9 +204,25 @@ pub fn card_frame(ctx: &Context, selected: bool) -> egui::Frame {
 }
 
 /// Muted text colour (hints, breadcrumbs, counters).
+///
+/// Fixed values per theme rather than "blend the text towards the panel": blending towards a
+/// light background produces unreadable low-contrast text (which is exactly what the light
+/// theme did before this was pinned down).
 pub fn muted(ctx: &Context) -> Color32 {
-    let visuals = ctx.style().visuals.clone();
-    mix(visuals.override_text_color.unwrap_or(Color32::GRAY), visuals.panel_fill, 0.45)
+    if ctx.style().visuals.dark_mode {
+        Color32::from_rgb(0x9A, 0xA3, 0xB2)
+    } else {
+        Color32::from_rgb(0x5A, 0x62, 0x70)
+    }
+}
+
+/// Colour for secondary/strong text that must stay readable on both themes.
+pub fn strong_text(ctx: &Context) -> Color32 {
+    if ctx.style().visuals.dark_mode {
+        Color32::from_rgb(0xF2, 0xF4, 0xF9)
+    } else {
+        Color32::from_rgb(0x12, 0x16, 0x1C)
+    }
 }
 
 /// Blend two colours (`t` = 0 → `a`, 1 → `b`).
@@ -248,6 +268,42 @@ mod tests {
         assert_eq!(mix(a, b, 7.0), b);
     }
 
+    /// Composite a (premultiplied) colour over an opaque background.
+    fn over(fill: Color32, background: Color32) -> Color32 {
+        let alpha = fill.a() as f32 / 255.0;
+        let blend = |front: u8, back: u8| {
+            (front as f32 + back as f32 * (1.0 - alpha)).round().clamp(0.0, 255.0) as u8
+        };
+        Color32::from_rgb(
+            blend(fill.r(), background.r()),
+            blend(fill.g(), background.g()),
+            blend(fill.b(), background.b()),
+        )
+    }
+
+    #[test]
+    fn selected_labels_are_readable() {
+        // egui paints a selected `selectable_label` with `selection.stroke.color` on top of
+        // `selection.bg_fill` (which is semi-transparent, so it must be composited first).
+        for visuals in [dark_visuals(), light_visuals()] {
+            let pill = over(visuals.selection.bg_fill, visuals.panel_fill);
+            let ratio = contrast_ratio(visuals.selection.stroke.color, pill);
+            assert!(
+                ratio >= 4.5,
+                "selected label contrast {ratio:.2} ({:?} on {pill:?})",
+                visuals.selection.stroke.color
+            );
+        }
+    }
+
+    #[test]
+    fn accent_on_panel_is_usable_for_links() {
+        for visuals in [dark_visuals(), light_visuals()] {
+            let ratio = contrast_ratio(visuals.hyperlink_color, visuals.extreme_bg_color);
+            assert!(ratio >= 4.5, "link contrast {ratio:.2}");
+        }
+    }
+
     #[test]
     fn palettes_differ_between_themes() {
         let dark = dark_visuals();
@@ -255,5 +311,66 @@ mod tests {
         assert!(dark.dark_mode);
         assert!(!light.dark_mode);
         assert_ne!(dark.panel_fill, light.panel_fill);
+    }
+
+    /// WCAG relative luminance.
+    fn relative_luminance(colour: Color32) -> f32 {
+        fn channel(value: u8) -> f32 {
+            let value = value as f32 / 255.0;
+            if value <= 0.03928 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        0.2126 * channel(colour.r()) + 0.7152 * channel(colour.g()) + 0.0722 * channel(colour.b())
+    }
+
+    /// WCAG contrast ratio between two colours (1.0 = identical, 21.0 = black on white).
+    fn contrast_ratio(a: Color32, b: Color32) -> f32 {
+        let (first, second) = (relative_luminance(a), relative_luminance(b));
+        let (lighter, darker) = if first > second {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    #[test]
+    fn muted_text_keeps_contrast_on_both_themes() {
+        // Small secondary text must stay at WCAG AA (4.5:1) against its panel.
+        let dark_muted = Color32::from_rgb(0x9A, 0xA3, 0xB2);
+        let dark_bg = dark_visuals().panel_fill;
+        assert!(
+            contrast_ratio(dark_muted, dark_bg) >= 4.5,
+            "dark muted contrast {}",
+            contrast_ratio(dark_muted, dark_bg)
+        );
+
+        let light_muted = Color32::from_rgb(0x5A, 0x62, 0x70);
+        let light_bg = light_visuals().panel_fill;
+        assert!(
+            contrast_ratio(light_muted, light_bg) >= 4.5,
+            "light muted contrast {}",
+            contrast_ratio(light_muted, light_bg)
+        );
+
+        // The previous implementation blended the text towards the panel, which fails AA on
+        // the light theme — this is the regression the assertion above is protecting.
+        let old_light = mix(Color32::from_rgb(0x1B, 0x1F, 0x27), light_bg, 0.45);
+        assert!(
+            contrast_ratio(old_light, light_bg) < 4.5,
+            "the old blend was expected to fail AA, got {}",
+            contrast_ratio(old_light, light_bg)
+        );
+
+        // Strong text is meant to be the opposite: high contrast on both themes.
+        for (text, bg) in [
+            (Color32::from_rgb(0xF2, 0xF4, 0xF9), dark_bg),
+            (Color32::from_rgb(0x12, 0x16, 0x1C), light_bg),
+        ] {
+            assert!(contrast_ratio(text, bg) >= 12.0);
+        }
     }
 }
