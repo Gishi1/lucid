@@ -1,0 +1,27 @@
+[package]
+name = "lucid"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Lucid — fast, modern MSHC help viewer (GUI + headless CLI)"
+
+[[bin]]
+name = "lucid"
+path = "src/main.rs"
+
+[dependencies]
+lucid-mshc = { path = "../lucid-mshc" }
+lucid-search = { path = "../lucid-search" }
+lucid-forge = { path = "../lucid-forge" }
+eframe.workspace = true
+egui.workspace = true
+image.workspace = true
+dirs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "lucid-forge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "MSHC packer: build valid .mshc packages (OPC parts + HelpContentSet manifest) from topic HTML"
+
+[dependencies]
+zip.workspace = true
+roxmltree.workspace = true
+scraper.workspace = true
+walkdir.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

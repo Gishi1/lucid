@@ -1,0 +1,19 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Generated demo/test artifacts (keep the committed canonical one)
+testdata/*.tmp.mshc
+testdata/out/
+/extract/
+
+# Editor / OS
+*.swp
+*~
+.DS_Store
+.idea/
+.vscode/
+
+# Local scratch
+/tmp/
+*.log

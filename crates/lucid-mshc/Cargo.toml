@@ -1,0 +1,19 @@
+[package]
+name = "lucid-mshc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "MSHC (Microsoft Help Container) parsing: packages, content sets, TOC/index reconstruction, assets"
+
+[dependencies]
+zip.workspace = true
+roxmltree.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,65 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lucid-mshc",
+    "crates/lucid-search",
+    "crates/lucid-forge",
+    "crates/lucid",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.86"
+license = "MIT OR Apache-2.0"
+authors = ["gishi"]
+description = "Lucid — a fast, modern viewer for Microsoft Help Container (.mshc) documentation"
+
+[workspace.dependencies]
+# --- core format handling -------------------------------------------------
+# Pinned deliberately: the toolchain here is rustc 1.86, and newer zip/image releases pull
+# `zopfli`/`icu_*` which require 1.88+. `cargo tree` is the source of truth if this drifts.
+zip = { version = "=1.1.4", default-features = false, features = ["deflate"] }
+roxmltree = "0.20"
+scraper = "0.19"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+thiserror = "2.0"
+anyhow = "1.0"
+walkdir = "2.5"
+tempfile = "3.13"
+
+# --- search ---------------------------------------------------------------
+unicode-segmentation = "1.13"
+rust-stemmers = "1.2"
+strsim = "0.11"
+
+# --- app / gui ------------------------------------------------------------
+eframe = { version = "0.32.3", default-features = false, features = [
+    "glow",
+    "wayland",
+    "x11",
+    "default_fonts",
+] }
+egui = "0.32.3"
+image = { version = "=0.25.9", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "bmp",
+    "webp",
+] }
+dirs = "6.0"
+rayon = "1.10"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
