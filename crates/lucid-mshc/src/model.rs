@@ -8,6 +8,14 @@
 //! nested lists, tables, `<pre>`/`<code>`, blockquotes, rules, images, anchors, and the
 //! Microsoft Help behaviours `CollapsibleArea`, `CodeSnippet`, `LanguageSpecificText`,
 //! `div.title`, `div.alert` + `span.label` and `InheritedMember`.
+//!
+//! The older Sandcastle/Help Viewer 1.x markup that ships in real `.mshc` packages is
+//! recognised too: `div.pageHeader`/`div.pageFooter` chrome, `table.titleTable`,
+//! `div.codeSnippetContainer` language tabs, `div.collapsibleAreaRegion` +
+//! `div.collapsibleSection`, `h1.heading` + `div[name=collapseableSection]`, and the
+//! `AddLanguageSpecificTextSet("id?cs=…|nu=…")` separators written into `<script>` tags.
+
+use std::collections::BTreeMap;
 
 use crate::html::arena::{Arena, NodeId};
 
@@ -153,6 +161,7 @@ pub fn parse_document(html: &str) -> Document {
         anchors: Vec::new(),
         outline: Vec::new(),
         snippet_group: None,
+        language_specific: collect_language_specific(html),
         depth: 0,
         skip_child: None,
     };
@@ -412,12 +421,70 @@ pub fn slugify(text: &str) -> String {
 // Arena → model
 // ---------------------------------------------------------------------------------------
 
+/// Language-specific punctuation written by Help Viewer/Sandcastle.
+///
+/// The topic contains an empty placeholder and a script call:
+///
+/// ```html
+/// <span id="LSTD3D7B158_0"></span>
+/// <script>AddLanguageSpecificTextSet("LSTD3D7B158_0?cpp=::|nu=.");</script>
+/// ```
+///
+/// Script bodies are not part of the DOM (the lexer keeps them out of the arena), so the
+/// separators have to be recovered from the raw source before conversion.
+fn collect_language_specific(html: &str) -> BTreeMap<String, Inline> {
+    const CALL: &str = "AddLanguageSpecificTextSet(";
+    let mut out = BTreeMap::new();
+    let mut rest = html;
+    while let Some(pos) = rest.find(CALL) {
+        rest = &rest[pos + CALL.len()..];
+        let quoted = rest.trim_start();
+        let quote = match quoted.chars().next() {
+            Some(quote @ ('"' | '\'')) => quote,
+            _ => continue,
+        };
+        let body = &quoted[1..];
+        let Some(end) = body.find(quote) else {
+            continue;
+        };
+        let spec = &body[..end];
+        // Only the `id?key=value|…` form belongs to a placeholder.
+        let Some((id, values)) = spec.split_once('?') else {
+            continue;
+        };
+        if id.trim().is_empty() {
+            continue;
+        }
+        let (mut cs, mut vb, mut cpp, mut nu) = (String::new(), String::new(), String::new(), String::new());
+        for pair in values.split('|') {
+            let Some((key, value)) = pair.split_once('=') else {
+                continue;
+            };
+            let value = crate::html::decode_entities(value);
+            match key.trim().to_ascii_lowercase().as_str() {
+                "cs" => cs = value,
+                "vb" => vb = value,
+                "cpp" => cpp = value,
+                "nu" => nu = value,
+                _ => {}
+            }
+        }
+        out.insert(
+            id.trim().to_owned(),
+            Inline::LanguageSpecific { cs, vb, cpp, nu },
+        );
+    }
+    out
+}
+
 struct Convert<'a> {
     arena: &'a Arena,
     title: Option<String>,
     anchors: Vec<String>,
     outline: Vec<OutlineEntry>,
     snippet_group: Option<String>,
+    /// Separators for `<span id="LST…">` placeholders (see [`collect_language_specific`]).
+    language_specific: BTreeMap<String, Inline>,
     depth: usize,
     /// A child to skip while converting (see [`Convert::nested_except`]).
     skip_child: Option<NodeId>,
@@ -458,13 +525,16 @@ fn is_skipped(name: &str) -> bool {
     )
 }
 
+fn is_heading(name: &str) -> bool {
+    matches!(name, "h1" | "h2" | "h3" | "h4" | "h5" | "h6")
+}
+
 fn is_inline_name(name: &str) -> bool {
     matches!(
         name,
         "a" | "b"
             | "strong"
-            | "i"
-            | "em"
+            | "i"            | "em"
             | "cite"
             | "var"
             | "dfn"
@@ -513,7 +583,11 @@ impl<'a> Convert<'a> {
         }
         let mut out: Vec<Block> = Vec::new();
         let mut pending: Vec<Inline> = Vec::new();
-        for child in self.arena.children(node).to_vec() {
+        let children = self.arena.children(node).to_vec();
+        let mut index = 0;
+        while index < children.len() {
+            let child = children[index];
+            index += 1;
             if Some(child) == self.skip_child {
                 continue;
             }
@@ -533,6 +607,57 @@ impl<'a> Convert<'a> {
             if is_skipped(&name) || self.is_chrome(child, &name) {
                 continue;
             }
+            // `<br>` can be a direct child of a block container (`<dd>`, `<td>`, `<div>`),
+            // not only of a paragraph. Dropping it glued `…ICustomScan` to `object…`.
+            if name == "br" {
+                pending.push(Inline::LineBreak);
+                continue;
+            }
+
+            // `div.collapsibleAreaRegion` is a *title*; the body lives in the immediately
+            // following `div.collapsibleSection`. Pairing them keeps real reference pages
+            // (Syntax / Remarks / Example / See Also) collapsible instead of printing the
+            // title as loose text.
+            if name == "div" && self.class_is(child, "collapsiblearearegion") {
+                if let Some((section, offset)) = self.following_section(&children[index..]) {
+                    flush(&mut out, &mut pending);
+                    let title = self.region_title(child);
+                    self.note_collapsible(&title);
+                    let blocks = self.nested(section);
+                    out.push(Block::Collapsible {
+                        title,
+                        expanded: true,
+                        blocks,
+                    });
+                    index += offset + 1;
+                    continue;
+                }
+            }
+
+            // The Sandcastle flavour uses `<h1 class="heading">…</h1>` followed by
+            // `<div name="collapseableSection">…</div>`.
+            if is_heading(&name) && self.class_is(child, "heading") {
+                if let Some((section, offset)) = self.following_named_section(&children[index..]) {
+                    flush(&mut out, &mut pending);
+                    let title = normalize_ws(&self.arena.subtree_text(child, true));
+                    self.note_collapsible(&title);
+                    let blocks = self.nested(section);
+                    out.push(Block::Collapsible {
+                        title,
+                        expanded: true,
+                        blocks,
+                    });
+                    index += offset + 1;
+                    continue;
+                }
+            }
+
+            // A language-specific separator placeholder (`<span id="LST…">`).
+            if let Some(placeholder) = self.placeholder(child) {
+                pending.push(placeholder);
+                continue;
+            }
+
             if let Some(mut blocks) = self.try_block_element(child, &name) {
                 flush(&mut out, &mut pending);
                 out.append(&mut blocks);
@@ -549,10 +674,152 @@ impl<'a> Convert<'a> {
         if name != "div" {
             return false;
         }
-        matches!(
-            self.arena.id_attr(id).map(|s| s.to_ascii_lowercase()),
-            Some(ref v) if v == "header" || v == "footer"
-        )
+        if let Some(value) = self.arena.id_attr(id) {
+            let value = value.to_ascii_lowercase();
+            if matches!(value.as_str(), "header" | "footer" | "pageheader" | "pagefooter") {
+                return true;
+            }
+        }
+        self.class_is(id, "pageheader") || self.class_is(id, "pagefooter")
+    }
+
+    /// Exact class-token match (`has_class` is a substring test).
+    fn class_is(&self, id: NodeId, class: &str) -> bool {
+        self.arena.classes(id).iter().any(|c| c == class)
+    }
+
+    /// The next element sibling, ignoring text nodes and ignored elements.
+    fn next_element(&self, siblings: &[NodeId]) -> Option<(NodeId, usize)> {
+        for (offset, sibling) in siblings.iter().copied().enumerate() {
+            if self.arena.is_text(sibling) {
+                continue;
+            }
+            let name = match self.arena.name(sibling) {
+                Some(n) => n,
+                None => continue,
+            };
+            if is_skipped(name) {
+                continue;
+            }
+            return Some((sibling, offset));
+        }
+        None
+    }
+
+    /// A `div.collapsibleSection` directly after a `div.collapsibleAreaRegion`.
+    fn following_section(&self, siblings: &[NodeId]) -> Option<(NodeId, usize)> {
+        let (sibling, offset) = self.next_element(siblings)?;
+        if self.arena.name(sibling) == Some("div")
+            && self.class_is(sibling, "collapsiblesection")
+        {
+            Some((sibling, offset))
+        } else {
+            None
+        }
+    }
+
+    /// A `div[name="collapseableSection"]` directly after a Sandcastle `h1.heading`.
+    fn following_named_section(&self, siblings: &[NodeId]) -> Option<(NodeId, usize)> {
+        let (sibling, offset) = self.next_element(siblings)?;
+        if self.arena.name(sibling) == Some("div")
+            && self.arena.attr_lc(sibling, "name").as_deref() == Some("collapseablesection")
+        {
+            Some((sibling, offset))
+        } else {
+            None
+        }
+    }
+
+    /// The visible title of a `div.collapsibleAreaRegion`.
+    fn region_title(&self, id: NodeId) -> String {
+        self.arena
+            .find_first(id, &|a, n| {
+                a.name(n) == Some("span") && a.has_class(n, "collapsibleregiontitle")
+            })
+            .map(|n| normalize_ws(&self.arena.subtree_text(n, true)))
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                self.arena
+                    .find_first(id, &|a, n| a.name(n) == Some("span"))
+                    .map(|n| normalize_ws(&self.arena.subtree_text(n, true)))
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or_else(|| "Details".to_owned())
+    }
+
+    /// The separator for an empty language-specific placeholder, if this node is one.
+    fn placeholder(&self, id: NodeId) -> Option<Inline> {
+        let id_attr = self.arena.id_attr(id)?;
+        let inline = self.language_specific.get(id_attr)?;
+        if self.arena.subtree_text(id, true).trim().is_empty() {
+            Some(inline.clone())
+        } else {
+            None
+        }
+    }
+
+    /// A collapsible section title takes part in the "On this page" outline.
+    fn note_collapsible(&mut self, title: &str) {
+        if title.is_empty() {
+            return;
+        }
+        let anchor = slugify(title);
+        if self.anchors.iter().any(|existing| existing == &anchor) {
+            return;
+        }
+        self.note_anchor(&anchor);
+        self.outline.push(OutlineEntry {
+            level: 2,
+            text: title.to_owned(),
+            anchor,
+        });
+    }
+
+    /// `span.languageSpecificText` with one child per language (`span.cs`, `span.vb`, …).
+    fn language_specific_spans(&self, id: NodeId) -> Inline {
+        let (mut cs, mut vb, mut cpp, mut nu) = (
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        );
+        for child in self.arena.children(id) {
+            let value = normalize_ws(&self.arena.subtree_text(*child, true));
+            if value.is_empty() {
+                continue;
+            }
+            let classes = self.arena.classes(*child);
+            if classes.iter().any(|c| c == "cs") {
+                cs = value;
+            } else if classes.iter().any(|c| c == "vb") {
+                vb = value;
+            } else if classes.iter().any(|c| c == "cpp") {
+                cpp = value;
+            } else if classes.iter().any(|c| c == "nu") {
+                nu = value;
+            }
+        }
+        if cs.is_empty() && vb.is_empty() && cpp.is_empty() && nu.is_empty() {
+            nu = normalize_ws(&self.arena.subtree_text(id, true));
+        }
+        Inline::LanguageSpecific { cs, vb, cpp, nu }
+    }
+
+    /// Images that exist only to draw the expand/collapse or copy controls.
+    fn is_decorative_image(&self, id: NodeId) -> bool {
+        if self.arena.has_class(id, "toggle") {
+            return true;
+        }
+        if self.arena.attr_lc(id, "name").as_deref() == Some("toggleswitch") {
+            return true;
+        }
+        if let Some(style) = self.arena.attr_lc(id, "style") {
+            let compact: String = style.chars().filter(|c| !c.is_whitespace()).collect();
+            if compact.contains("display:none") {
+                return true;
+            }
+        }
+        false
     }
 
     /// Convert an element as a block, or `None` when it is inline content.
@@ -575,15 +842,27 @@ impl<'a> Convert<'a> {
             }]),
             "ul" | "ol" | "menu" | "dir" => Some(vec![self.list(id, name != "ul" && name != "menu" && name != "dir")]),
             "dl" => Some(vec![self.definition_list(id)]),
-            "table" => Some(vec![self.table(id)]),
-            "img" => Some(vec![Block::Image {
-                src: self.arena.attr(id, "src").unwrap_or("").to_owned(),
-                alt: self
-                    .arena
-                    .attr(id, "alt")
-                    .map(crate::html::decode_entities)
-                    .unwrap_or_default(),
-            }]),
+            "table" => {
+                if self.class_is(id, "titletable") {
+                    // Help Viewer 1.x page title: `IScans<span/>SetCustomScan Method`.
+                    Some(vec![self.title_table(id)])
+                } else {
+                    Some(vec![self.table(id)])
+                }
+            }
+            "img" => {
+                if self.is_decorative_image(id) {
+                    return Some(Vec::new());
+                }
+                Some(vec![Block::Image {
+                    src: self.arena.attr(id, "src").unwrap_or("").to_owned(),
+                    alt: self
+                        .arena
+                        .attr(id, "alt")
+                        .map(crate::html::decode_entities)
+                        .unwrap_or_default(),
+                }])
+            }
             "codesnippet" => Some(vec![self.code_block(id, "codesnippet")]),
             "collapsiblearea" => Some(vec![self.collapsible(id, None)]),
             "inheritedmember" => Some(vec![self.collapsible(id, Some("Inherited Members"))]),
@@ -613,6 +892,17 @@ impl<'a> Convert<'a> {
             }
             "div" | "center" | "section" | "article" | "aside" | "main" | "figure"
             | "figcaption" | "address" | "fieldset" | "details" | "span" => {
+                // Help Viewer 1.x code snippet with language tabs. The tabs and the Copy
+                // toolbar must not be printed as text; the code divs become one group.
+                if name == "div" && self.class_is(id, "codesnippetcontainer") {
+                    return Some(self.shfb_snippet_container(id));
+                }
+                // Sandcastle 1.x: `div.code` with one `span[codeLanguage]` per language.
+                if name == "div" && self.class_is(id, "code") {
+                    if let Some(blocks) = self.sandcastle_snippets(id) {
+                        return Some(blocks);
+                    }
+                }
                 // Microsoft Help behaviours carried in class/id attributes.
                 if has_class("alert") || has_class("note") {
                     return Some(vec![self.note(id)]);
@@ -774,6 +1064,17 @@ impl<'a> Convert<'a> {
         }
     }
 
+    /// The Help Viewer 1.x `table.titleTable` page title.
+    fn title_table(&mut self, id: NodeId) -> Block {
+        let cell = self
+            .arena
+            .find_first(id, &|a, n| matches!(a.name(n), Some("td") | Some("th")));
+        match cell {
+            Some(cell) => self.heading(cell, 1),
+            None => self.heading(id, 1),
+        }
+    }
+
     fn table(&mut self, id: NodeId) -> Block {
         let caption = self
             .arena
@@ -908,6 +1209,121 @@ impl<'a> Convert<'a> {
         }
     }
 
+    /// `div.codeSnippetContainer`: language tabs, a Copy toolbar and one code div per
+    /// language. The tabs/toolbar are chrome; the code divs become a single snippet group.
+    fn shfb_snippet_container(&mut self, id: NodeId) -> Vec<Block> {
+        let mut tab_nodes = Vec::new();
+        collect_by_class(self.arena, id, "codesnippetcontainertab", &mut tab_nodes);
+        let mut code_nodes = Vec::new();
+        collect_by_class(self.arena, id, "codesnippetcontainercode", &mut code_nodes);
+
+        // (position, language code, tab label)
+        let mut tabs: Vec<(usize, String, String)> = Vec::new();
+        for (fallback, tab) in tab_nodes.iter().copied().enumerate() {
+            let label = normalize_ws(&self.arena.subtree_text(tab, true));
+            let onclick = self
+                .arena
+                .find_first(tab, &|a, n| a.attr(n, "onclick").is_some())
+                .and_then(|n| self.arena.attr(n, "onclick"))
+                .unwrap_or("");
+            let args = call_args(onclick, "ChangeTab");
+            let position = args
+                .as_ref()
+                .and_then(|args| args.get(2))
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(fallback + 1);
+            let language = args
+                .as_ref()
+                .and_then(|args| args.get(1))
+                .cloned()
+                .unwrap_or_default();
+            tabs.push((position, language, label));
+        }
+
+        if code_nodes.is_empty() {
+            // Not the tabbed shape after all: keep the snippet text if there is any.
+            if let Some(pre) = self
+                .arena
+                .find_first(id, &|a, n| a.name(n) == Some("pre"))
+            {
+                return vec![self.code_block(pre, "pre")];
+            }
+            return Vec::new();
+        }
+
+        let group = code_nodes.iter().find_map(|node| {
+            self.arena
+                .id_attr(*node)
+                .and_then(|id| id.split_once("_code_"))
+                .map(|(prefix, _)| prefix.to_owned())
+        });
+
+        let mut blocks = Vec::with_capacity(code_nodes.len());
+        for (position, node) in code_nodes.iter().copied().enumerate() {
+            let pre = self
+                .arena
+                .find_first(node, &|a, n| a.name(n) == Some("pre"))
+                .unwrap_or(node);
+            let mut block = self.code_block(pre, "pre");
+            if let Block::Code(code) = &mut block {
+                let tab = tabs
+                    .iter()
+                    .find(|(tab_position, ..)| *tab_position == position + 1)
+                    .or_else(|| tabs.get(position));
+                if let Some((_, language, label)) = tab {
+                    code.language = snippet_language(language);
+                    if !label.is_empty() {
+                        code.display_language = Some(label.clone());
+                    }
+                }
+                code.group = group.clone();
+                code.copyable = true;
+            }
+            blocks.push(block);
+        }
+        blocks
+    }
+
+    /// Sandcastle 1.x snippets: `div.code` → `span[codeLanguage]` → `table` (the header
+    /// cell is the tab label) → `pre`. All the spans become one snippet group.
+    fn sandcastle_snippets(&mut self, id: NodeId) -> Option<Vec<Block>> {
+        let mut spans = Vec::new();
+        collect_with_attr(self.arena, id, "codelanguage", &mut spans);
+        if spans.is_empty() {
+            return None;
+        }
+        let group = Some(match self.arena.id_attr(id) {
+            Some(id) => format!("code:{id}"),
+            None => format!("code:node{id}"),
+        });
+        let mut blocks = Vec::with_capacity(spans.len());
+        for span in spans {
+            let language = self
+                .arena
+                .attr(span, "codelanguage")
+                .unwrap_or("")
+                .to_owned();
+            let pre = self
+                .arena
+                .find_first(span, &|a, n| a.name(n) == Some("pre"))
+                .unwrap_or(span);
+            let label = self
+                .arena
+                .find_first(span, &|a, n| a.name(n) == Some("th"))
+                .map(|n| normalize_ws(&self.arena.subtree_text(n, true)))
+                .filter(|s| !s.is_empty());
+            let mut block = self.code_block(pre, "pre");
+            if let Block::Code(code) = &mut block {
+                code.language = snippet_language(&language);
+                code.display_language = label.or_else(|| snippet_language(&language));
+                code.group = group.clone();
+                code.copyable = true;
+            }
+            blocks.push(block);
+        }
+        Some(blocks)
+    }
+
     fn code_block(&mut self, id: NodeId, kind: &str) -> Block {
         let language = self
             .arena
@@ -1000,16 +1416,25 @@ impl<'a> Convert<'a> {
             if is_skipped(&name) {
                 continue;
             }
+            if let Some(placeholder) = self.placeholder(child) {
+                out.push(placeholder);
+                continue;
+            }
             match name.as_str() {
                 "br" => out.push(Inline::LineBreak),
-                "img" => out.push(Inline::Image {
-                    src: self.arena.attr(child, "src").unwrap_or("").to_owned(),
-                    alt: self
-                        .arena
-                        .attr(child, "alt")
-                        .map(crate::html::decode_entities)
-                        .unwrap_or_default(),
-                }),
+                "img" => {
+                    if self.is_decorative_image(child) {
+                        continue;
+                    }
+                    out.push(Inline::Image {
+                        src: self.arena.attr(child, "src").unwrap_or("").to_owned(),
+                        alt: self
+                            .arena
+                            .attr(child, "alt")
+                            .map(crate::html::decode_entities)
+                            .unwrap_or_default(),
+                    });
+                }
                 "b" | "strong" => out.push(Inline::Bold(self.inlines(child))),
                 "i" | "em" | "cite" | "var" | "dfn" => out.push(Inline::Italic(self.inlines(child))),
                 "u" | "ins" => out.push(Inline::Underline(self.inlines(child))),
@@ -1043,6 +1468,9 @@ impl<'a> Convert<'a> {
                         continue;
                     }
                     out.push(Inline::Link { target, inlines });
+                }
+                "span" if self.arena.has_class(child, "languagespecifictext") => {
+                    out.push(self.language_specific_spans(child));
                 }
                 "span" | "font" | "small" | "big" | "label" | "abbr" | "acronym" | "q" | "mark"
                 | "time" | "nobr" | "wbr" => {
@@ -1136,6 +1564,62 @@ impl<'a> Convert<'a> {
     }
 }
 
+/// Collect descendants carrying exactly `class` (case-insensitive token match).
+fn collect_by_class(arena: &Arena, node: NodeId, class: &str, out: &mut Vec<NodeId>) {
+    for child in arena.children(node) {
+        if arena.is_text(*child) {
+            continue;
+        }
+        if arena.classes(*child).iter().any(|c| c == class) {
+            out.push(*child);
+        }
+        collect_by_class(arena, *child, class, out);
+    }
+}
+
+/// Collect descendants carrying `attr` (stopping at the first match on a branch).
+fn collect_with_attr(arena: &Arena, node: NodeId, attr: &str, out: &mut Vec<NodeId>) {
+    for child in arena.children(node) {
+        if arena.is_text(*child) {
+            continue;
+        }
+        if arena.attr(*child, attr).is_some() {
+            out.push(*child);
+            continue;
+        }
+        collect_with_attr(arena, *child, attr, out);
+    }
+}
+
+/// Arguments of `name('a', 'b', …)` inside an inline event handler.
+fn call_args(script: &str, name: &str) -> Option<Vec<String>> {
+    let start = script.find(name)? + name.len();
+    let rest = script.get(start..)?.trim_start();
+    let rest = rest.strip_prefix('(')?;
+    let end = rest.find(')')?;
+    Some(
+        rest[..end]
+            .split(',')
+            .map(|arg| arg.trim().trim_matches(['\'', '"']).trim().to_owned())
+            .collect(),
+    )
+}
+
+/// Machine language name for a Help Viewer tab code (`cs`, `vb`, `cpp`, `fs`, …).
+fn snippet_language(code: &str) -> Option<String> {
+    let code = code.trim();
+    if code.is_empty() {
+        return None;
+    }
+    Some(match code.to_ascii_lowercase().as_str() {
+        "cs" | "csharp" => "CSharp".to_owned(),
+        "vb" | "visualbasic" | "visualbasicdeclaration" => "VisualBasic".to_owned(),
+        "cpp" | "managedcplusplus" | "visualcplusplus" => "CPlusPlus".to_owned(),
+        "fs" | "fsharp" => "FSharp".to_owned(),
+        _ => code.to_owned(),
+    })
+}
+
 fn flush(out: &mut Vec<Block>, pending: &mut Vec<Inline>) {
     if pending.is_empty() {
         return;
@@ -1224,6 +1708,29 @@ mod tests {
         assert!(text.contains("from Microsoft.Help.TocParent tags"), "{text}");
         assert!(!text.contains("Contents—"));
         assert!(!text.contains("fromMicrosoft"));
+    }
+
+    #[test]
+    fn block_level_br_breaks_the_line() {
+        // `iapi.mshc` writes the signature separator as a block-level `<br>`:
+        // `<b>Type:</b> <a>ICustomScan</a><br/>object containing …`.
+        let doc = parse_document(
+            r#"<div class="summary"><b>Type:</b> <a href="x.htm">ICustomScan</a><br/>object containing the scan definition.</div>"#,
+        );
+        let paragraph = match &doc.blocks[0] {
+            Block::Paragraph { inlines } => inlines,
+            other => panic!("expected a paragraph, got {other:?}"),
+        };
+        assert!(
+            paragraph.iter().any(|inline| matches!(inline, Inline::LineBreak)),
+            "{paragraph:?}"
+        );
+        let text = blocks_text(&doc.blocks);
+        assert!(
+            text.contains("ICustomScan\nobject containing"),
+            "the break must survive as a newline: {text:?}"
+        );
+        assert!(!text.contains("ICustomScanobject"), "{text:?}");
     }
 
     #[test]
@@ -1425,6 +1932,215 @@ End Sub</CodeSnippet>
         html.push_str("deep");
         let doc = parse_document(&html);
         assert!(doc.text.contains("deep"));
+    }
+
+    #[test]
+    fn shfb_title_table_becomes_a_heading_with_its_separator() {
+        // Copied from Thermo Fisher's `iapi.mshc` (`IScans.SetCustomScan Method`).
+        let doc = parse_document(
+            r#"<div class="pageHeader" id="PageHeader">Thermo Fisher Instrument API Documentation</div>
+               <div class="pageBody"><div class="topicContent">
+               <table class="titleTable"><tr><td class="titleColumn">IScans<span id="LSTF80A9584_0">
+               </span><script type="text/javascript">AddLanguageSpecificTextSet("LSTF80A9584_0?cpp=::|nu=.");</script>SetCustomScan Method </td></tr></table>
+               <p>Body text.</p>
+               </div></div>
+               <div id="pageFooter" class="pageFooter">Send comments about this topic</div>"#,
+        );
+        assert_eq!(doc.title.as_deref(), Some("IScans.SetCustomScan Method"));
+        assert!(
+            matches!(doc.blocks[0], Block::Heading { level: 1, .. }),
+            "expected the title table to become an H1: {:?}",
+            doc.blocks
+        );
+        assert!(doc.text.contains("IScans.SetCustomScan Method"), "{}", doc.text);
+        assert!(!doc.text.contains("Thermo Fisher"), "{}", doc.text);
+        assert!(!doc.text.contains("Send comments"), "{}", doc.text);
+        assert!(doc.text.contains("Body text."));
+    }
+
+    #[test]
+    fn shfb_snippet_container_becomes_one_group() {
+        let doc = parse_document(
+            r##"<div class="collapsibleAreaRegion">
+                 <span class="collapsibleRegionTitle"><img class="collapseToggle" src="icons/SectionExpanded.png" />Syntax</span>
+               </div>
+               <div class="collapsibleSection">
+               <div class="codeSnippetContainer">
+                 <div class="codeSnippetContainerTabs">
+                   <div id="ID0EDCA_tab1" class="codeSnippetContainerTab"><a href="#" onclick="javascript:ChangeTab('ID0EDCA','cs','1','4');return false;">C#</a></div>
+                   <div id="ID0EDCA_tab2" class="codeSnippetContainerTab"><a href="#" onclick="javascript:ChangeTab('ID0EDCA','vb','2','4');return false;">VB</a></div>
+                   <div id="ID0EDCA_tab3" class="codeSnippetContainerTab"><a href="#" onclick="javascript:ChangeTab('ID0EDCA','cpp','3','4');return false;">C++</a></div>
+                   <div id="ID0EDCA_tab4" class="codeSnippetContainerTab"><a href="#" onclick="javascript:ChangeTab('ID0EDCA','fs','4','4');return false;">F#</a></div>
+                 </div>
+                 <div class="codeSnippetContainerCodeContainer">
+                   <div class="codeSnippetToolBar"><div class="codeSnippetToolBarText"><a class="copyCodeSnippet" onclick="javascript:CopyToClipboard('ID0EDCA');return false;" title="Copy">Copy</a></div></div>
+                   <div id="ID0EDCA_code_Div1" class="codeSnippetContainerCode" style="display: block"><pre xml:space="preserve">event <span class="identifier">EventHandler</span> <span class="identifier">CanAcceptNextCustomScan</span></pre></div>
+                   <div id="ID0EDCA_code_Div2" class="codeSnippetContainerCode" style="display: none"><pre xml:space="preserve">Event CanAcceptNextCustomScan As EventHandler</pre></div>
+                   <div id="ID0EDCA_code_Div3" class="codeSnippetContainerCode" style="display: none"><pre xml:space="preserve">event EventHandler^ CanAcceptNextCustomScan;</pre></div>
+                   <div id="ID0EDCA_code_Div4" class="codeSnippetContainerCode" style="display: none"><pre xml:space="preserve">abstract CanAcceptNextCustomScan : IEvent&lt;EventHandler, EventArgs&gt;</pre></div>
+                 </div>
+               </div>
+               </div>"##,
+        );
+        let codes: Vec<&CodeBlock> = doc
+            .blocks
+            .iter()
+            .find_map(|block| match block {
+                Block::Collapsible { blocks, .. } => Some(blocks),
+                _ => None,
+            })
+            .expect("collapsible syntax region")
+            .iter()
+            .filter_map(|block| match block {
+                Block::Code(code) => Some(code),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(codes.len(), 4, "one code block per language: {codes:?}");
+        assert!(codes
+            .iter()
+            .all(|code| code.group.as_deref() == Some("ID0EDCA")));
+        assert_eq!(
+            codes
+                .iter()
+                .map(|code| code.display_language.as_deref().unwrap_or(""))
+                .collect::<Vec<_>>(),
+            vec!["C#", "VB", "C++", "F#"]
+        );
+        assert_eq!(
+            codes[0].lines,
+            vec!["event EventHandler CanAcceptNextCustomScan"]
+        );
+        assert!(codes[3].lines[0].contains("IEvent<EventHandler"));
+        assert!(codes.iter().all(|code| code.copyable));
+        // Tabs and the Copy toolbar are chrome, never body text.
+        assert!(!doc.text.contains("Copy"), "{}", doc.text);
+        assert!(!doc.text.contains("C#"), "{}", doc.text);
+    }
+
+    #[test]
+    fn shfb_collapsible_region_pairs_with_its_section() {
+        let doc = parse_document(
+            r#"<div class="collapsibleAreaRegion" id="syntaxSection">
+                 <span class="collapsibleRegionTitle" onclick="SectionExpandCollapse('ID1RB')" tabindex="0">
+                   <img id="ID1RBToggle" class="collapseToggle" alt="Section image" src="icons/SectionExpanded.png" />Syntax</span>
+               </div>
+               <div id="ID1RBSection" class="collapsibleSection"><p>snippet text</p></div>
+               <p>after</p>"#,
+        );
+        match &doc.blocks[0] {
+            Block::Collapsible {
+                title,
+                expanded,
+                blocks,
+            } => {
+                assert_eq!(title, "Syntax");
+                assert!(expanded);
+                assert!(blocks_text(blocks).contains("snippet text"));
+            }
+            other => panic!("expected a collapsible region, got {other:?}"),
+        }
+        assert!(doc.text.contains("after"));
+        assert!(!doc.text.contains("Section image"), "{}", doc.text);
+        assert!(!doc.text.contains("image not available"), "{}", doc.text);
+    }
+
+    #[test]
+    fn sandcastle_heading_pairs_with_its_collapseable_section() {
+        // `genericparsing.mshc` uses `<h1 class="heading">` + `div[name=collapseableSection]`.
+        let doc = parse_document(
+            r#"<h1 class="heading"><span onclick="ExpandCollapse(propertyTableToggle)">
+                 <img id="propertyTableToggle" class="toggle" name="toggleSwitch" src="../icons/collapse_all.gif" />Properties</span></h1>
+               <div id="propertyTableSection" class="section" name="collapseableSection">
+                 <table><tr><th>Name</th></tr><tr><td>ColumnCount</td></tr></table>
+               </div>
+               <p>tail</p>"#,
+        );
+        match &doc.blocks[0] {
+            Block::Collapsible { title, blocks, .. } => {
+                assert_eq!(title, "Properties");
+                assert!(blocks_text(blocks).contains("ColumnCount"));
+            }
+            other => panic!("expected a collapsible section, got {other:?}"),
+        }
+        assert!(doc.text.contains("tail"));
+    }
+
+    #[test]
+    fn sandcastle_code_spans_become_one_group() {
+        // `genericparsing.mshc`/`revit.mshc` syntax blocks: `div.code` + `span[codeLanguage]`.
+        let doc = parse_document(
+            r#"<div id="syntaxCodeBlocks" class="code">
+                 <span codeLanguage="CSharp"><table><tr><th>C#</th></tr><tr><td><pre>public class Parser { }</pre></td></tr></table></span>
+                 <span codeLanguage="VisualBasicDeclaration"><table><tr><th>Visual Basic (Declaration)</th></tr><tr><td><pre>Public Class Parser
+End Class</pre></td></tr></table></span>
+                 <span codeLanguage="ManagedCPlusPlus"><table><tr><th>Visual C++</th></tr><tr><td><pre>public ref class Parser {};</pre></td></tr></table></span>
+               </div>"#,
+        );
+        let codes: Vec<&CodeBlock> = doc
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Code(code) => Some(code),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(codes.len(), 3, "{codes:?}");
+        assert!(codes
+            .iter()
+            .all(|code| code.group.as_deref() == Some("code:syntaxCodeBlocks")));
+        assert_eq!(codes[0].language.as_deref(), Some("CSharp"));
+        assert_eq!(codes[1].language.as_deref(), Some("VisualBasic"));
+        assert_eq!(codes[0].display_language.as_deref(), Some("C#"));
+        assert_eq!(
+            codes[1].display_language.as_deref(),
+            Some("Visual Basic (Declaration)")
+        );
+        assert_eq!(codes[2].display_language.as_deref(), Some("Visual C++"));
+        assert_eq!(codes[0].lines, vec!["public class Parser { }"]);
+        // The header cells are tabs, not body text or tables.
+        assert!(!doc.text.contains("Visual C++"), "{}", doc.text);
+    }
+
+    #[test]
+    fn sandcastle_language_specific_text_prefers_one_language() {
+        let doc = parse_document(
+            r#"<p>System<span class="languageSpecificText"><span class="cs">.</span><span class="vb">.</span><span class="cpp">::</span><span class="nu">.</span></span>Object</p>"#,
+        );
+        assert_eq!(doc.text.trim(), "System.Object");
+    }
+
+    #[test]
+    fn collapsible_sections_join_the_outline() {
+        let doc = parse_document(
+            r#"<div class="collapsibleAreaRegion"><span class="collapsibleRegionTitle">Syntax</span></div>
+               <div class="collapsibleSection"><p>x</p></div>"#,
+        );
+        assert_eq!(doc.outline.len(), 1, "{:?}", doc.outline);
+        assert_eq!(doc.outline[0].text, "Syntax");
+        assert_eq!(doc.outline[0].level, 2);
+        assert_eq!(doc.outline[0].anchor, "syntax");
+    }
+
+    #[test]
+    fn language_specific_separators_come_from_the_script() {
+        let doc = parse_document(
+            r#"<p>List<span id="LST1"></span><script>AddLanguageSpecificTextSet("LST1?cs=&lt;|vb=(Of |cpp=&lt;|nu=(");</script>Item<span id="LST2"></span><script>AddLanguageSpecificTextSet("LST2?cs=&gt;|vb=)|cpp=&gt;|nu=)");</script></p>"#,
+        );
+        assert_eq!(doc.text.trim(), "List<Item>", "{}", doc.text);
+        let paragraph = match &doc.blocks[0] {
+            Block::Paragraph { inlines } => inlines,
+            other => panic!("expected a paragraph, got {other:?}"),
+        };
+        assert!(
+            paragraph
+                .iter()
+                .any(|inline| matches!(inline, Inline::LanguageSpecific { cs, .. } if cs == "<")),
+            "{paragraph:?}"
+        );
+        // A placeholder without a script entry contributes nothing.
+        let doc = parse_document("<p>a<span id=\"NOPE\"></span>b</p>");
+        assert_eq!(doc.text.trim(), "ab");
     }
 
     #[test]

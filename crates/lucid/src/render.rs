@@ -203,6 +203,18 @@ pub struct Renderer<'a> {
     drawn_groups: HashSet<String>,
     anchors: std::collections::HashMap<String, f32>,
     blocks: Vec<BlockAnchor>,
+    /// Monotonic table counter: `Grid` ids must be unique within a topic, and two member
+    /// tables often have the same row count.
+    table_index: usize,
+    /// Table cells whose longest token cannot fit the column. Only those are allowed to
+    /// break mid-token; ordinary prose keeps wrapping at word boundaries.
+    break_anywhere_depth: usize,
+    /// Nesting depth of the table cell being drawn (0 outside tables).
+    cell_depth: usize,
+    /// Width a table cell's text must wrap at. Inside `Grid` the measured
+    /// `available_width()` can be zero (the sizing pass, and every block after the first
+    /// in a cell), so the cell width is carried explicitly instead.
+    cell_wrap: Option<f32>,
 }
 
 impl<'a> Renderer<'a> {
@@ -232,6 +244,10 @@ impl<'a> Renderer<'a> {
             drawn_groups: HashSet::new(),
             anchors: std::collections::HashMap::new(),
             blocks: Vec::new(),
+            table_index: 0,
+            break_anywhere_depth: 0,
+            cell_depth: 0,
+            cell_wrap: None,
         }
     }
 
@@ -328,6 +344,10 @@ impl<'a> Renderer<'a> {
                 expanded,
                 blocks,
             } => {
+                // Section titles are outline entries too; the model registered the matching
+                // anchor, so clicking the outline must scroll here.
+                self.anchors
+                    .insert(lucid_mshc::model::slugify(title), top);
                 egui::CollapsingHeader::new(RichText::new(title).strong())
                     .id_salt(format!("collapsible:{}:{}", self.key, title))
                     .default_open(*expanded)
@@ -397,12 +417,46 @@ impl<'a> Renderer<'a> {
             .max(1);
         let widths = self.column_widths(ui, table, columns);
         let spacing = 12.0;
-        let id = format!("table:{}:{}", self.key, table.rows.len());
+        // A `Grid` only ever grows its remembered column widths: after the window is
+        // resized narrower (or after the first, maximized frame) the table keeps its old,
+        // wider layout and pushes the document card — and with it every following block —
+        // past the panel edge. Draw the grid in a child clamped to the width the columns
+        // were measured for, and allocate exactly that much width in the parent. Anything
+        // the grid still wants beyond it is clipped instead of widening the page.
+        let total = (widths.iter().sum::<f32>() + spacing * columns.saturating_sub(1) as f32)
+            .min(ui.available_width())
+            .max(24.0);
+        // `table.rows.len()` alone is not unique: reference pages routinely have two
+        // member tables with the same row count, which made egui log duplicate `Grid` ids
+        // and drew one table on top of the other. The width is part of the id as well, so
+        // a table laid out for a wider window starts from fresh column widths.
+        let id = format!(
+            "table:{}:{}:{}:{}",
+            self.key,
+            self.table_index,
+            table.rows.len(),
+            total.round() as i64
+        );
+        self.table_index += 1;
+        let origin = ui.cursor().min;
+        let clip = egui::Rect::from_min_max(
+            egui::pos2(origin.x, ui.clip_rect().top()),
+            egui::pos2(origin.x + total, ui.clip_rect().bottom()),
+        );
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(egui::Rect::from_min_size(
+                    origin,
+                    egui::vec2(total, ui.available_height().max(1.0)),
+                ))
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        child.set_clip_rect(clip);
         egui::Grid::new(id)
             .striped(true)
             .num_columns(columns)
             .spacing(Vec2::new(spacing, 6.0))
-            .show(ui, |ui| {
+            .show(&mut child, |ui| {
                 for (row_index, row) in table.rows.iter().enumerate() {
                     let is_header = row.is_header || row_index < table.header_rows;
                     let mut column = 0usize;
@@ -415,16 +469,49 @@ impl<'a> Renderer<'a> {
                         column += span;
                         // A fixed width per cell is how a `Grid` gets sane column widths:
                         // without it every column collapses to its narrowest word.
-                        ui.scope(|ui| {
-                            ui.set_width(cell_width.max(24.0));
-                            if is_header {
-                                let strong = ui.visuals().strong_text_color();
-                                ui.style_mut().visuals.override_text_color = Some(strong);
-                            }
-                            for block in &cell.blocks {
-                                self.block(ui, block, 1);
-                            }
-                        });
+                        //
+                        // The cell is drawn in a *vertical* child. `Grid` adds its contents
+                        // inside a horizontal ui, so a cell with several blocks (a summary
+                        // with two paragraphs, a name plus a signature) used to lay them
+                        // out side by side: everything after the first block had zero width
+                        // left and wrapped one word per line.
+                        //
+                        // The child's measured height is then allocated as a single grid
+                        // widget. `allocate_ui_with_layout` would tell the grid only the
+                        // *requested* height (0), so a row never grew to fit its text and
+                        // the following row's stripe was painted over the last line.
+                        let cell_width = cell_width.max(24.0);
+                        let cell_origin = ui.cursor().min;
+                        let mut cell_ui = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(egui::Rect::from_min_size(
+                                    cell_origin,
+                                    egui::vec2(cell_width, ui.available_height().max(1.0)),
+                                ))
+                                .layout(egui::Layout::top_down(egui::Align::Min)),
+                        );
+                        cell_ui.set_width(cell_width);
+                        if is_header {
+                            let strong = cell_ui.visuals().strong_text_color();
+                            cell_ui.style_mut().visuals.override_text_color = Some(strong);
+                        }
+                        let text = cell_text(&cell.blocks);
+                        let forced = widest_word(&cell_ui, &text, self.scale) > cell_width;
+                        if forced {
+                            self.break_anywhere_depth += 1;
+                        }
+                        self.cell_depth += 1;
+                        let outer_wrap = self.cell_wrap.replace(cell_width);
+                        for block in &cell.blocks {
+                            self.block(&mut cell_ui, block, 1);
+                        }
+                        self.cell_wrap = outer_wrap;
+                        self.cell_depth -= 1;
+                        if forced {
+                            self.break_anywhere_depth -= 1;
+                        }
+                        let used = cell_ui.min_rect();
+                        ui.allocate_rect(used, egui::Sense::hover());
                         // `rowspan` is not modelled; padding keeps the columns aligned.
                         for _ in 1..span {
                             ui.label(" ");
@@ -433,14 +520,34 @@ impl<'a> Renderer<'a> {
                     ui.end_row();
                 }
             });
+        let height = child.min_rect().height();
+        ui.allocate_rect(
+            egui::Rect::from_min_size(origin, egui::vec2(total, height)),
+            egui::Sense::hover(),
+        );
     }
 
-    /// Column widths for a table: as wide as the widest cell, scaled down to fit.
+    /// Column widths for a table.
+    ///
+    /// `pref` is the width of the widest line (what the column would like) and `min` the
+    /// width of the widest unbreakable token (what it needs so an identifier is not cut
+    /// mid-word). When the table does not fit, prose columns give way down to their `min`
+    /// before any column is broken mid-token — `PossibleParameters` used to wrap as
+    /// `PossibleParamet` / `ers` on a 1280px window.
     fn column_widths(&self, ui: &Ui, table: &Table, columns: usize) -> Vec<f32> {
-        const MIN_COLUMN: f32 = 56.0;
+        const MIN_COLUMN: f32 = 40.0;
         const MAX_FRACTION: f32 = 0.6;
         let font = FontId::proportional(14.5 * self.scale);
-        let mut widths = vec![MIN_COLUMN; columns];
+        let measure = |text: &str| {
+            ui.fonts(|fonts| {
+                fonts
+                    .layout_no_wrap(text.to_owned(), font.clone(), ui.visuals().text_color())
+                    .rect
+                    .width()
+            })
+        };
+        let mut pref = vec![MIN_COLUMN; columns];
+        let mut min = vec![MIN_COLUMN; columns];
 
         for row in &table.rows {
             let mut column = 0usize;
@@ -449,32 +556,30 @@ impl<'a> Renderer<'a> {
                 if span == 0 {
                     continue;
                 }
-                // Measure the widest *line* of the cell: content wraps, so the longest line
-                // is a good estimate of what the column needs.
-                let text = lucid_mshc::model::blocks_text(&cell.blocks);
-                let longest = text
+                let text = cell_text(&cell.blocks);
+                let longest_line = text
                     .lines()
                     .map(str::trim)
                     .filter(|line| !line.is_empty())
                     .max_by_key(|line| line.chars().count())
                     .unwrap_or("");
-                if !longest.is_empty() {
-                    let measured = ui
-                        .fonts(|fonts| {
-                            fonts
-                                .layout_no_wrap(
-                                    longest.to_owned(),
-                                    font.clone(),
-                                    ui.visuals().text_color(),
-                                )
-                                .rect
-                                .width()
-                        })
-                        .max(MIN_COLUMN);
-                    let per_column = measured / span as f32;
+                let longest_token = text
+                    .split_whitespace()
+                    .max_by(|a, b| measure(a).total_cmp(&measure(b)))
+                    .unwrap_or("");
+                if !longest_line.is_empty() {
+                    let measured = measure(longest_line).max(MIN_COLUMN) / span as f32;
                     for offset in 0..span {
                         if column + offset < columns {
-                            widths[column + offset] = widths[column + offset].max(per_column);
+                            pref[column + offset] = pref[column + offset].max(measured);
+                        }
+                    }
+                }
+                if !longest_token.is_empty() {
+                    let measured = measure(longest_token).max(24.0) / span as f32;
+                    for offset in 0..span {
+                        if column + offset < columns {
+                            min[column + offset] = min[column + offset].max(measured);
                         }
                     }
                 }
@@ -485,17 +590,33 @@ impl<'a> Renderer<'a> {
         let spacing = 12.0 * columns.saturating_sub(1) as f32;
         let available = (ui.available_width() - spacing).max(columns as f32 * 32.0);
         // No single column may starve the others.
-        for width in widths.iter_mut() {
-            *width = width.min(available * MAX_FRACTION);
+        for (wanted, needed) in pref.iter_mut().zip(&min) {
+            *wanted = wanted.min(available * MAX_FRACTION).max(*needed);
         }
-        let total: f32 = widths.iter().sum();
-        if total > available {
-            let factor = available / total;
-            for width in widths.iter_mut() {
-                *width = (*width * factor).max(MIN_COLUMN);
-            }
+        let preferred: f32 = pref.iter().sum();
+        if preferred <= available {
+            return pref;
         }
-        widths
+        // Give every column what it needs, then share the slack in proportion to how much
+        // more each column would *like* to have.
+        let needed: f32 = min.iter().sum();
+        if needed >= available {
+            let factor = available / needed;
+            return min.iter().map(|width| (width * factor).max(16.0)).collect();
+        }
+        let slack = available - needed;
+        let wanted: f32 = pref
+            .iter()
+            .zip(&min)
+            .map(|(wanted, needed)| (wanted - needed).max(0.0))
+            .sum();
+        if wanted <= 0.0 {
+            return min;
+        }
+        min.iter()
+            .zip(&pref)
+            .map(|(needed, wanted)| needed + slack * (wanted - needed).max(0.0) / wanted)
+            .collect()
     }
 
     fn code(&mut self, ui: &mut Ui, code: &CodeBlock) {
@@ -560,12 +681,9 @@ impl<'a> Renderer<'a> {
         }
         let chosen = &group.codes[selected];
         let text = chosen.lines.join("\n");
-        self.code_block(
-            ui,
-            &text,
-            chosen.display_language.as_deref(),
-            chosen.copyable,
-        );
+        // The tab row already names the language; printing it again inside the frame
+        // duplicated every `C#`/`VB` label (seen on real `iapi.mshc` pages).
+        self.code_block(ui, &text, None, chosen.copyable);
     }
 
     fn code_block(&mut self, ui: &mut Ui, text: &str, language: Option<&str>, copyable: bool) {
@@ -618,9 +736,12 @@ impl<'a> Renderer<'a> {
                 });
             }
         }
-        if !alt.trim().is_empty() {
-            // Caption styled like the rest of the small print (alt text).
-            let mut caption = JobBuilder::new(ui, TextKind::Small, self.scale);
+        if !alt.trim().is_empty() && self.cell_depth == 0 {
+            // Caption styled like the rest of the small print (alt text). Member icons in
+            // reference tables carry their access level in `alt`; captioning those turned
+            // the icon column into a wrapped `Public method` block.
+            let mut caption =
+                JobBuilder::new(ui, TextKind::Small, self.scale, false, self.cell_wrap);
             caption.text(alt, TextKind::Small.format(ui, self.scale));
             caption.finish(ui, self.action_sink);
         }
@@ -630,7 +751,13 @@ impl<'a> Renderer<'a> {
     // ------------------------------------------------------------------ inline text
 
     fn label(&mut self, ui: &mut Ui, inlines: &[Inline], kind: TextKind) {
-        let mut builder = JobBuilder::new(ui, kind, self.scale);
+        let mut builder = JobBuilder::new(
+            ui,
+            kind,
+            self.scale,
+            self.break_anywhere_depth > 0,
+            self.cell_wrap,
+        );
         builder.highlight = self.highlight.clone();
         builder.find = self.find.clone();
         for inline in inlines {
@@ -652,10 +779,17 @@ struct JobBuilder {
 }
 
 impl JobBuilder {
-    fn new(ui: &Ui, kind: TextKind, scale: f32) -> Self {
+    fn new(
+        ui: &Ui,
+        kind: TextKind,
+        scale: f32,
+        break_anywhere: bool,
+        wrap: Option<f32>,
+    ) -> Self {
         let base = kind.format(ui, scale);
         let mut job = LayoutJob::default();
-        job.wrap.max_width = ui.available_width().max(32.0);
+        job.wrap.max_width = wrap.unwrap_or_else(|| ui.available_width()).max(32.0);
+        job.wrap.break_anywhere = break_anywhere;
         job.sections.push(LayoutSection {
             leading_space: 0.0,
             byte_range: 0..0,
@@ -825,7 +959,9 @@ impl JobBuilder {
                 };
                 self.text(&label, format);
             }
-            Inline::LineBreak => self.text(" ", format),
+            // A real row break, not a space: block-level `<br>` separates signature lines
+            // (`Type: ICustomScan` / `object containing…`) and collapsing it glued them.
+            Inline::LineBreak => self.text("\n", format),
             Inline::LanguageSpecific { cs, vb, cpp, nu } => {
                 let chosen = match language {
                     CodeLanguage::Cs => cs,
@@ -854,11 +990,17 @@ impl JobBuilder {
         if job.text.is_empty() {
             return;
         }
+        // Lay the job out with the width chosen above and hand egui the finished galley.
+        // `Label::wrap` would otherwise replace `max_width` with `ui.available_width()`,
+        // which is zero in a `Grid` cell after its first widget and during the grid's
+        // sizing pass — text then wrapped at 32 px and rows grew to thousands of pixels.
+        let galley = ui.fonts(|fonts| fonts.layout_job(job.clone()));
         let response = ui.add(
-            egui::Label::new(job.clone())
+            egui::Label::new(galley)
                 .sense(Sense::click())
                 .selectable(true),
         );
+
         if links.is_empty() {
             return;
         }
@@ -942,6 +1084,67 @@ fn block_text_length(block: &Block) -> usize {
 
 fn blocks_text_length(blocks: &[Block]) -> usize {
     blocks.iter().map(block_text_length).sum()
+}
+
+/// Text a table cell actually shows.
+///
+/// Block images inside cells are drawn without their `alt` caption (they are member
+/// icons), so the caption must not influence the column width either.
+fn cell_text(blocks: &[Block]) -> String {
+    let mut out = String::new();
+    push_cell_text(blocks, &mut out);
+    out
+}
+
+fn push_cell_text(blocks: &[Block], out: &mut String) {
+    for block in blocks {
+        match block {
+            Block::Heading { inlines, .. } | Block::Paragraph { inlines } => {
+                out.push_str(&lucid_mshc::model::inline_text(inlines));
+                out.push('\n');
+            }
+            Block::List { items, .. } => {
+                for item in items {
+                    push_cell_text(item, out);
+                }
+            }
+            Block::Table(table) => {
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        push_cell_text(&cell.blocks, out);
+                    }
+                }
+            }
+            Block::Code(code) => {
+                for line in &code.lines {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+            Block::Note { blocks, .. } | Block::Quote { blocks } => push_cell_text(blocks, out),
+            Block::Collapsible { title, blocks, .. } => {
+                out.push_str(title);
+                out.push('\n');
+                push_cell_text(blocks, out);
+            }
+            Block::Rule | Block::Image { .. } | Block::Anchor(_) => {}
+        }
+    }
+}
+
+/// Width of the widest whitespace-delimited token in `text`.
+fn widest_word(ui: &Ui, text: &str, scale: f32) -> f32 {
+    let font = FontId::proportional(14.5 * scale);
+    text.split_whitespace()
+        .map(|word| {
+            ui.fonts(|fonts| {
+                fonts
+                    .layout_no_wrap(word.to_owned(), font.clone(), ui.visuals().text_color())
+                    .rect
+                    .width()
+            })
+        })
+        .fold(0.0f32, f32::max)
 }
 
 /// Collect the snippet groups of a document (used for the language tabs).

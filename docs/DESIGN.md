@@ -102,6 +102,30 @@ Rendered natively (no JS):
   inside the package (and across packages of a content set), case-insensitively.
 - `Inherited Member` markup → collapsible "members" block.
 
+Legacy vendor markup (SHFB / Sandcastle 1.x, the shape most real `.mshc` files still
+have) is normalised to the model above rather than passed through as raw HTML:
+
+- `div.pageHeader` / `div.pageFooter`, `#header` / `#footer` → package chrome, dropped
+  (the topic header and footer belong to the viewer, not the document).
+- `table.titleTable > td.titleColumn` → the topic heading. `AddLanguageSpecificTextSet`
+  separators (`cs=.|vb=.|cpp=::|nu=.`) are resolved through the preferred language.
+- `div.codeSnippetContainer` (SHFB) and `div.code` + `span[codeLanguage]` (Sandcastle) →
+  one grouped code block with language tabs and a copy button; a tab-less container
+  falls back to a plain code block.
+- `div.collapsibleAreaRegion` followed by its `div.collapsibleSection`, and Sandcastle's
+  `h1.heading` + `div[name="collapseableSection"]` → a collapsible section, also listed
+  in the per-topic outline.
+- `span.languageSpecificText > span.cs/.vb/.cpp/.nu` → language-specific text.
+- Toggle/hidden images are dropped; a block-level `<br>` becomes a real line break
+  (reference signatures put `Type: …` and its description on separate lines).
+
+Reference tables (member lists, parameter and exception tables) are laid out by the
+renderer rather than by the browser: each column is measured from its widest line and
+widest unbreakable token, every cell is wrapped at its own column width, and a cell's
+blocks are stacked vertically. This keeps long summaries inside the reading measure; a
+`Grid`-only version let multi-paragraph cells run sideways and stretched rows to
+thousands of pixels.
+
 ### 2.4 TOC reconstruction algorithm
 
 1. If a manifest part contains TOC nodes (`HelpTOCNode`, `HelpTOC`, `Topic`, `Node` with
@@ -395,7 +419,7 @@ to an unusable sliver. The status bar never repeats what another element already
 | --- | --- | --- |
 | Minimum window | 900 × 600 | Below this the panes stop being usable; the window manager enforces it |
 | Outline pane | auto-hidden under 1080 px | The document needs the width more than a 200 px column of headings does; the Outline button stays visible and its tooltip explains why it is off |
-| Sidebar | 300 px default, 220–520 px | Resizable; the search results need the room |
+| Sidebar | 300 px default, 220–520 px, never over 40% of the window | Resizable; the search results need the room, but at 900 px the document needs it more |
 | Reading measure | 1120 px, centred | Un-capped, a 2560 px display gives ~170-character lines |
 | Toolbar | two rows, auto height | See above |
 | Status bar | one line, ellipsized | Never duplicates the index or pane counters |

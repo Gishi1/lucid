@@ -12,7 +12,7 @@ use crate::toc::TocNode;
 use crate::zipread;
 
 /// Format version of derived data (index cache); bump when parsing semantics change.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// What the user pointed Lucid at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

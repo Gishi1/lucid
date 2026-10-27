@@ -973,10 +973,15 @@ impl LucidApp {
                     (tab.title.clone(), id)
                 });
                 if let Some((title, id)) = zoom {
-                    ui.label(
-                        RichText::new(if id.is_empty() { title } else { id })
-                            .small()
-                            .color(theme::muted(ui.ctx())),
+                    // `Microsoft.Help.Id` strings are long; without `truncate` the label
+                    // grew leftwards over the source/index labels at 900px.
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(if id.is_empty() { title } else { id })
+                                .small()
+                                .color(theme::muted(ui.ctx())),
+                        )
+                        .truncate(),
                     );
                 }
             });
@@ -1014,22 +1019,28 @@ impl LucidApp {
             ui.label(RichText::new("Open a package to browse its contents.").color(theme::muted(ui.ctx())));
             return;
         }
+        // Buttons first, right-to-left, so the text field takes exactly the room that is
+        // left. Reserving a guessed number of pixels instead made the row a couple of
+        // pixels wider than the pane every frame, and egui then widened the side panel a
+        // little more on each repaint.
         ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.toc_filter)
-                    .hint_text("Filter contents")
-                    .desired_width((ui.available_width() - 112.0).max(60.0)),
-            );
-            if ui.small_button("All").on_hover_text("Expand everything").clicked() {
-                let titles: Vec<String> = self
-                    .set()
-                    .map(|set| all_titles(&set.toc))
-                    .unwrap_or_default();
-                self.toc_expanded.extend(titles);
-            }
-            if ui.small_button("None").on_hover_text("Collapse everything").clicked() {
-                self.toc_expanded.clear();
-            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.small_button("None").on_hover_text("Collapse everything").clicked() {
+                    self.toc_expanded.clear();
+                }
+                if ui.small_button("All").on_hover_text("Expand everything").clicked() {
+                    let titles: Vec<String> = self
+                        .set()
+                        .map(|set| all_titles(&set.toc))
+                        .unwrap_or_default();
+                    self.toc_expanded.extend(titles);
+                }
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.toc_filter)
+                        .hint_text("Filter contents")
+                        .desired_width(ui.available_width().max(60.0)),
+                );
+            });
         });
         ui.add_space(4.0);
 
@@ -1109,7 +1120,13 @@ impl LucidApp {
             if selected {
                 text = text.color(theme::strong_text(ui.ctx()));
             }
-            let response = ui.selectable_label(selected, text);
+            // A tree label must not be wider than the pane: it makes the side panel's
+            // content rect overflow, which (in egui) pushes the next panel away and leaves
+            // an unpainted gap at narrow window widths.
+            let response = ui
+                .add(egui::Button::selectable(selected, text).truncate())
+                // The tree is narrow; the tooltip still spells the whole title out.
+                .on_hover_text(&node.title);
             if response.clicked() {
                 match node.key {
                     Some(key) => actions.push(Action::OpenTopic {
@@ -1662,31 +1679,45 @@ impl LucidApp {
         }
         let mut close: Option<usize> = None;
         let mut activate: Option<usize> = None;
-        ScrollArea::horizontal()
-            .id_salt("tab-bar")
-            .max_height(30.0)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for (index, tab) in self.tabs.iter().enumerate() {
-                        let selected = index == self.active_tab;
-                        let title = shorten(&tab.title, 28);
-                        if ui.selectable_label(selected, title).clicked() {
-                            activate = Some(index);
+        // The tabs scroll sideways; `Close all` stays pinned so it cannot be half-clipped
+        // by a long tab title at a narrow window width.
+        ui.horizontal(|ui| {
+            let width = (ui.available_width() - 84.0).max(96.0);
+            // Shorten titles to the room a tab really has, so its close button is not the
+            // widget that gets scrolled out of sight. Many tabs still scroll sideways.
+            let per_tab = width / self.tabs.len().max(1) as f32;
+            let title_room = if self.tabs.len() <= 3 {
+                (per_tab - 48.0).max(40.0)
+            } else {
+                f32::INFINITY
+            };
+            ScrollArea::horizontal()
+                .id_salt("tab-bar")
+                .max_height(30.0)
+                .max_width(width)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for (index, tab) in self.tabs.iter().enumerate() {
+                            let selected = index == self.active_tab;
+                            let title = fit_label(ui, &tab.title, title_room);
+                            if ui.selectable_label(selected, title).clicked() {
+                                activate = Some(index);
+                            }
+                            if ui
+                                .small_button("✖")
+                                .on_hover_text("Close tab (Ctrl+W)")
+                                .clicked()
+                            {
+                                close = Some(index);
+                            }
+                            ui.add_space(2.0);
                         }
-                        if ui
-                            .small_button("✖")
-                            .on_hover_text("Close tab (Ctrl+W)")
-                            .clicked()
-                        {
-                            close = Some(index);
-                        }
-                        ui.add_space(2.0);
-                    }
-                    if ui.small_button("Close all").clicked() {
-                        actions.push(Action::CloseAllTabs);
-                    }
+                    });
                 });
-            });
+            if ui.small_button("Close all").clicked() {
+                actions.push(Action::CloseAllTabs);
+            }
+        });
         if let Some(index) = activate {
             actions.push(Action::ActivateTab(index));
         }
@@ -1698,50 +1729,99 @@ impl LucidApp {
             if let Some(set) = self.set() {
                 let crumbs = set.breadcrumb(tab.key);
                 if crumbs.len() > 1 {
-                ui.horizontal_wrapped(|ui| {
-                    for (index, (title, key)) in crumbs.iter().enumerate() {
-                        if index > 0 {
+                    // The trailing bookmark/copy buttons are laid out right-to-left. egui
+                    // starts that child at the current cursor, so the crumb run has to be
+                    // limited up front; otherwise a long path draws its last crumb through
+                    // the buttons (seen on a 1280px `iapi.mshc` window).
+                    ui.horizontal(|ui| {
+                        const TRAILING: f32 = 120.0;
+                        let room = (ui.available_width() - TRAILING).max(96.0);
+                        let font = egui::FontId::proportional(12.5);
+                        let measure = |text: &str| {
+                            ui.fonts(|fonts| {
+                                fonts
+                                    .layout_no_wrap(
+                                        text.to_owned(),
+                                        font.clone(),
+                                        ui.visuals().text_color(),
+                                    )
+                                    .rect
+                                    .width()
+                            })
+                        };
+                        let sep = measure("›") + 8.0;
+                        let mut cap = 48usize;
+                        let mut first = 0usize;
+                        let width = |first: usize, cap: usize| -> f32 {
+                            let mut width = if first > 0 { sep + measure("…") } else { 0.0 };
+                            for (index, (title, _)) in crumbs.iter().enumerate().skip(first) {
+                                if index > first {
+                                    width += sep;
+                                }
+                                width += measure(&shorten(title, cap));
+                            }
+                            width
+                        };
+                        // Keep at least the last two crumbs; drop the ancestors first, then
+                        // shorten what is left.
+                        while width(first, cap) > room && first + 2 < crumbs.len() {
+                            first += 1;
+                        }
+                        while width(first, cap) > room && cap > 12 {
+                            cap = (cap / 2).max(12);
+                        }
+                        if first > 0 {
+                            let muted = RichText::new("…").size(12.5).color(theme::muted(ui.ctx()));
+                            ui.label(muted);
                             ui.label(RichText::new("›").color(theme::muted(ui.ctx())));
                         }
-                        let is_last = index + 1 == crumbs.len();
-                        let label = RichText::new(title).size(12.5);
-                        let label = if is_last {
-                            label.strong()
-                        } else {
-                            label.color(theme::muted(ui.ctx()))
-                        };
-                        if !is_last {
-                            if let Some(key) = key {
-                                if ui.link(label).clicked() {
-                                    actions.push(Action::OpenTopic {
-                                        key: *key,
-                                        anchor: None,
-                                        highlight: Vec::new(),
-                                    });
-                                }
+                        for (index, (title, key)) in crumbs.iter().enumerate().skip(first) {
+                            if index > first {
+                                ui.label(RichText::new("›").color(theme::muted(ui.ctx())));
                             }
-                        } else {
-                            ui.label(label);
+                            let is_last = index + 1 == crumbs.len();
+                            let label = RichText::new(shorten(title, cap)).size(12.5);
+                            let label = if is_last {
+                                label.strong()
+                            } else {
+                                label.color(theme::muted(ui.ctx()))
+                            };
+                            if !is_last {
+                                if let Some(key) = key {
+                                    if ui.link(label).clicked() {
+                                        actions.push(Action::OpenTopic {
+                                            key: *key,
+                                            anchor: None,
+                                            highlight: Vec::new(),
+                                        });
+                                    }
+                                }
+                            } else {
+                                ui.label(label);
+                            }
                         }
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui
-                            .small_button("Copy link")
-                            .on_hover_text("Copy ms-xhelp link to the clipboard")
-                            .clicked()
-                        {
-                            let id = set.topic_id(tab.key);
-                            actions.push(Action::Copy(format!("ms-xhelp:///?Id={id}")));
-                        }
-                        let bookmarked = self
-                            .state
-                            .is_bookmarked(&self.source_id(), set.topic_id(tab.key));
-                        let star = if bookmarked { "★" } else { "☆" };
-                        if ui.small_button(star).on_hover_text("Bookmark (Ctrl+D)").clicked() {
-                            actions.push(Action::ToggleBookmark);
-                        }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui
+                                .small_button("Copy link")
+                                .on_hover_text("Copy ms-xhelp link to the clipboard")
+                                .clicked()
+                            {
+                                let id = set.topic_id(tab.key);
+                                actions.push(Action::Copy(format!("ms-xhelp:///?Id={id}")));
+                            }
+                            let bookmarked = self
+                                .state
+                                .is_bookmarked(&self.source_id(), set.topic_id(tab.key));
+                            let star = if bookmarked { "★" } else { "☆" };
+                            if ui
+                                .small_button(star)
+                                .on_hover_text("Bookmark (Ctrl+D)")
+                                .clicked()
+                            {
+                                actions.push(Action::ToggleBookmark);
+                            }
+                        });
                     });
-                });
                 }
             }
         }
@@ -2493,10 +2573,13 @@ impl eframe::App for LucidApp {
             .show(ctx, |ui| {
                 self.status_bar(ui);
             });
+        // A persisted 520 px sidebar must not starve the document when the window is
+        // 900 px wide; the range is capped by the window, not only by the hard maximum.
+        let sidebar_max = (ctx.screen_rect().width() * 0.40).clamp(220.0, 520.0);
         egui::SidePanel::left("sidebar")
             .resizable(true)
-            .default_width(self.state.sidebar_width)
-            .width_range(240.0..=560.0)
+            .default_width(self.state.sidebar_width.min(sidebar_max))
+            .width_range(220.0..=sidebar_max)
             .show(ctx, |ui| {
                 self.sidebar(ui, &mut actions);
             });
@@ -2579,6 +2662,34 @@ fn subtree_matches(node: &TocNode<TopicKey>, filter: &str) -> bool {
 
 fn filter_matches(title: &str, filter: &str) -> bool {
     filter.is_empty() || title.to_lowercase().contains(filter)
+}
+
+/// Shorten `text` until it is no wider than `room` (font size 14.5, widget text).
+fn fit_label(ui: &Ui, text: &str, room: f32) -> String {
+    if !room.is_finite() {
+        return shorten(text, 28);
+    }
+    let font = egui::FontId::proportional(14.5);
+    let measure = |text: &str| {
+        ui.fonts(|fonts| {
+            fonts
+                .layout_no_wrap(text.to_owned(), font.clone(), ui.visuals().text_color())
+                .rect
+                .width()
+        })
+    };
+    if measure(text) <= room {
+        return text.to_owned();
+    }
+    let mut chars: Vec<char> = text.chars().collect();
+    while !chars.is_empty() {
+        chars.pop();
+        let candidate = format!("{}…", chars.iter().collect::<String>());
+        if measure(&candidate) <= room {
+            return candidate;
+        }
+    }
+    "…".to_owned()
 }
 
 fn shorten(text: &str, max: usize) -> String {
