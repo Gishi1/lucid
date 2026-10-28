@@ -31,7 +31,7 @@ topic HTML.
    keyboard-first navigation, tabs, per-topic outline, zoom, copy-code, DRY CLI.
 5. Cross-platform, no Windows API, no .NET, no HTML engine needed.
 
-**Non-goals (v0.1)**
+**Non-goals (v1.0)**
 
 - Rendering arbitrary modern web HTML/CSS/JS. Topics are W3C Basic 1.1 XHTML + a small
   set of `Microsoft.Help.*` behaviours; we render that subset *natively* and skip scripts.
@@ -63,7 +63,7 @@ Additional deployment formats we accept:
 - **`.msha` setup file** — the HTML-ish *Help Content Setup* document listing
   `<div class="package"><a class="current-link" href="x.mshc">` entries; we use it to
   discover sibling packages when the user opens it.
-- **`.cab`** — VS content packages are cab files containing `.mshc`. v0.1 detects cab
+- **`.cab`** — VS content packages are cab files containing `.mshc`. Lucid detects cab
   magic bytes and reports a clear "extract with cabextract/unshield first" error
   instead of a confusing zip error. (In-process cab support is on the roadmap.)
 
@@ -434,8 +434,8 @@ Only characters that were *verified* by rendering them are used in the UI:
 - **Missing (do not use):** `▾ ▸ ▲ ▼ ✕ ⓘ ⌕ ← → ↑ ↓ ☾ ⏎` and the geometric-shape block
   (`□ ▫`) generally.
 
-If a new icon is needed, render it with the glyph probe described in `PLAN.md` (S3) instead
-of trusting a Unicode chart.
+If a new icon is needed, render it with a throwaway glyph probe (draw the candidates into
+an image and inspect it) instead of trusting a Unicode chart.
 
 Panes (left dock, tabs, resizable, remembers width & tab):
 
@@ -494,8 +494,8 @@ GUI-only flags:
 ```
 
 `--screenshot` exists so the layout can be checked without a human at the keyboard: the
-example below writes five images, one per window size, and the contrast/layout audit in
-`PLAN.md` S3 runs over them.
+example below writes five images, one per window size, and the layout/contrast audit runs
+over them.
 
 ```
 for size in 900x600 1280x800 1920x1080; do
@@ -510,13 +510,13 @@ Exit codes: 0 ok, 1 IO/format error, 2 bad usage, 3 topic/keyword not found.
 
 ## 7. Roadmap
 
-- **v0.2** — in-process `.cab` support (MU/VS content packages) and `.mshi` catalogs;
+- **v1.1** — in-process `.cab` support (MU/VS content packages) and `.mshi` catalogs;
   syntax highlighting for code snippets (syntect, lazy per language); export topic/whole
   book to PDF; print layout; CSS subset (`font-weight`, `color`, `text-align`, borders of
   `table.alert`); SVG assets (resvg).
-- **v0.3** — semantic search (optional local embeddings + hybrid rerank), "similar topics",
+- **v1.2** — semantic search (optional local embeddings + hybrid rerank), "similar topics",
   per-topic summaries; saved searches; multi-window; localization of the UI.
-- **v0.4** — CHM/HxS import (ITSS/CHM decoding) so Help 1.x/2.x content can be opened and
+- **v2.0** — CHM/HxS import (ITSS/CHM decoding) so Help 1.x/2.x content can be opened and
   republished as MSHC; GUI authoring (a real DocMounter alternative).
 - Cross-cutting: Nix flake + AppImage/deb packaging, fuzzing of the parser, benchmark
   suite (open 1 000-topic book, 100 k-topic content set) wired to `cargo bench`.

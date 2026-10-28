@@ -1,0 +1,152 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify tag and version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare tag with Cargo.toml
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          echo "tag=${tag} manifest=${version}"
+          test -n "${version}"
+          test "${tag}" = "${version}"
+          grep -q "## \[${tag}\]" CHANGELOG.md
+
+  test:
+    name: Test before release
+    needs: verify
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux window development packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxi-dev \
+            libgl1-mesa-dev libxcursor-dev libxrandr-dev libxinerama-dev
+
+      - name: Install Rust 1.86
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.86"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+  build:
+    name: ${{ matrix.target }}
+    needs: [verify, test]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux window development packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxi-dev \
+            libgl1-mesa-dev libxcursor-dev libxrandr-dev libxinerama-dev
+
+      - name: Install Rust 1.86
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.86"
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build release binaries
+        run: cargo build --release --locked --target ${{ matrix.target }} -p lucid -p lucid-forge
+
+      - name: Package archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          name="lucid-${version}-${{ matrix.target }}"
+          mkdir -p "stage/${name}" dist
+          suffix=""
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            suffix=".exe"
+          fi
+          cp "target/${{ matrix.target }}/release/lucid${suffix}" "stage/${name}/"
+          cp "target/${{ matrix.target }}/release/lucid-forge${suffix}" "stage/${name}/"
+          cp README.md LICENSE CHANGELOG.md "stage/${name}/"
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            python -c "import shutil; shutil.make_archive('dist/${name}', 'zip', 'stage', '${name}')"
+          else
+            tar -czf "dist/${name}.tar.gz" -C stage "${name}"
+          fi
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Write checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Lucid ${{ github.ref_name }}
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          token: ${{ secrets.GITHUB_TOKEN }}

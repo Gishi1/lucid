@@ -1,6 +1,6 @@
 # SPEC — Lucid, a modern MSHC (Microsoft Help Container) viewer & packer
 
-Status: **draft for v0.1** · Owner: gishi · Deep technical reference: [`docs/DESIGN.md`](docs/DESIGN.md)
+Status: **released (v1.0)** · Owner: gishi · Deep technical reference: [`docs/DESIGN.md`](docs/DESIGN.md)
 
 ## 1. Problem
 
@@ -122,13 +122,15 @@ Ship **Lucid**: a single-binary, cross-platform, native Rust application that
   lazily; only metadata + rendered topic stay in memory).
 - **NFR-4** Pure Rust safe code (`#![forbid(unsafe_code)]`) except third-party crates; no
   runtime dependency on .NET, Java, a browser/WebView, or a database server.
-- **NFR-5** Cross-platform: Linux (Wayland/X11), Windows, macOS. Linux build must not
-  require pkg-config/GTK.
-- **NFR-6** `cargo fmt` clean, `cargo clippy -- -D warnings` clean, `cargo test` green.
+- **NFR-5** Cross-platform: Linux (Wayland/X11), Windows, macOS. The Linux build needs
+  the X11/Wayland/OpenGL development headers, but no GTK or WebKit.
+- **NFR-6** Warning-free `cargo check --workspace --all-targets` and green
+  `cargo test --workspace`; `cargo fmt`/`cargo clippy` clean when those components are
+  installed.
 - **NFR-7** Every parser rule is covered by a test built on generated fixtures (no
   third-party content is redistributed).
 
-## 6. Compatibility matrix (v0.1)
+## 6. Compatibility matrix (v1.0)
 
 | Source | Status |
 | --- | --- |
@@ -139,7 +141,7 @@ Ship **Lucid**: a single-binary, cross-platform, native Rust application that
 | `.msha` setup document | Supported (package discovery) |
 | `.cab` content packages | Detected, clear error; extraction roadmap |
 | `.mshi` / `.metadata` sidecars | Read for package metadata (best effort) |
-| CHM (`*.chm`), HxS (`*.hxs`) | Out of scope for v0.1 (roadmap) |
+| CHM (`*.chm`), HxS (`*.hxs`) | Out of scope for v1.0 (roadmap) |
 
 ## 7. Persistence & data locations
 
@@ -152,9 +154,10 @@ Ship **Lucid**: a single-binary, cross-platform, native Rust application that
 Fingerprint = sorted package paths + sizes + mtimes + index format version; any change
 forces a rebuild (silently, in the background).
 
-## 8. Acceptance criteria (v0.1 "done")
+## 8. Acceptance criteria (v1.0 "done")
 
-1. `cargo build --release` succeeds on this machine (rustc 1.86, Linux, no system dev packages).
+1. `cargo build --release` succeeds on Linux with rustc 1.86 and the X11/Wayland/OpenGL
+   development headers listed in the README.
 2. `cargo test` passes, including: package parsing on generated fixtures, TOC
    reconstruction both ways (manifest / meta-tags only), asset case-insensitive lookup,
    search ranking sanity (exact title beats body mention), phrase/prefix/fuzzy/exclude
@@ -175,6 +178,9 @@ forces a rebuild (silently, in the background).
    hit) and the second open is measurably faster.
 7. README documents install, GUI usage, all keyboard shortcuts, CLI, and the format notes;
    `docs/DESIGN.md` stays the single source of truth for format decisions.
+8. Tagging `v1.0.0` produces release archives for Linux x86_64, macOS x86_64/arm64 and
+   Windows x86_64; each contains `lucid`, `lucid-forge`, `README.md`, `LICENSE` and
+   `CHANGELOG.md`, and the tag matches the workspace version.
 
 ## 9. Assumptions & open questions
 
@@ -187,6 +193,6 @@ forces a rebuild (silently, in the background).
   (DESIGN §2.4). *Open question:* add a strict XSD once a real-world sample set is
   available.
 - **A-4** Semantics of `.mshi` files are undocumented; parsed best-effort, never required.
-- **A-5** License: dual MIT OR Apache-2.0 (placeholder until the owner confirms).
-- **A-6** Windows/macOS builds are untested in this session (no such machine); the code
-  paths are platform-neutral (egui, no OS APIs).
+- **A-5** License: MIT (see [`LICENSE`](LICENSE)).
+- **A-6** Windows and macOS binaries are built by the release workflow; runtime testing is
+  Linux-first. The code paths are platform-neutral (egui, no OS APIs).

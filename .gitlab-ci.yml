@@ -1,0 +1,86 @@
+# GitLab CI mirror of .github/workflows/ci.yml.
+#
+# The project is hosted on GitHub, but the same check/test gate and a tagged Linux build
+# run on GitLab without changes. GitLab-specific features (FUNDING.yml, GitHub release
+# assets) are simply ignored by GitLab.
+
+stages:
+  - check
+  - test
+  - package
+  - release
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+default:
+  image: rust:1.86
+  interruptible: true
+  cache:
+    key:
+      files:
+        - Cargo.lock
+    paths:
+      - .cargo/
+      - target/
+  variables:
+    CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+    CARGO_TERM_COLOR: always
+  before_script:
+    - apt-get update
+    - >-
+      apt-get install -y --no-install-recommends
+      pkg-config
+      libxkbcommon-dev libwayland-dev libx11-dev libxi-dev
+      libgl1-mesa-dev libxcursor-dev libxrandr-dev libxinerama-dev
+
+check:
+  stage: check
+  script:
+    - cargo check --workspace --all-targets --locked
+
+test:
+  stage: test
+  script:
+    - cargo test --workspace --locked
+
+package:
+  stage: package
+  needs: ["check", "test"]
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - version="${CI_COMMIT_TAG#v}"
+    - name="lucid-${version}-x86_64-unknown-linux-gnu"
+    - mkdir -p "dist/${name}"
+    - cp target/release/lucid target/release/lucid-forge README.md LICENSE CHANGELOG.md "dist/${name}/"
+    - tar -czf "dist/${name}.tar.gz" -C dist "${name}"
+  artifacts:
+    name: "lucid-${CI_COMMIT_TAG}"
+    paths:
+      - dist/*.tar.gz
+    expire_in: 1 week
+
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  needs: ["package"]
+  before_script: []
+  cache: {}
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - echo "Creating GitLab release ${CI_COMMIT_TAG}"
+  release:
+    tag_name: "$CI_COMMIT_TAG"
+    name: "Lucid $CI_COMMIT_TAG"
+    description: "See CHANGELOG.md in the repository."
+    assets:
+      links:
+        - name: "Linux x86_64 build artifacts"
+          url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/download?job=package"

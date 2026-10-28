@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <sub><b>v0.1</b> — reading, search, export and packing all work. Acceptance criteria live in
+  <sub><b>v1.0</b> — reading, search, export and packing all work. Acceptance criteria live in
   <a href="SPEC.md">SPEC.md</a>.</sub>
 </p>
 
@@ -74,7 +74,7 @@ headers — Lucid needs no GTK, no WebKit and no .NET:
 
 ```bash
 # Debian / Ubuntu
-sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxi-dev \
+sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxi-dev \
     libgl1-mesa-dev libxcursor-dev libxrandr-dev libxinerama-dev
 ```
 
@@ -205,7 +205,7 @@ crates/lucid-search  inverted index + BM25F, query language, snippets, suggestio
 crates/lucid-forge   the packer (library + CLI) and the demo-package generator
 crates/lucid         the application: egui GUI + headless CLI
 docs/DESIGN.md       format algorithm, frozen APIs, UX specification
-SPEC.md / PLAN.md    requirements, acceptance criteria and the implementation plan
+SPEC.md              requirements and v1.0 acceptance criteria
 testdata/            demo-help.mshc — committed, self-authored sample package
 ```
 
@@ -230,15 +230,32 @@ Notes for contributors:
   require rustc 1.88+. If you bump one, run `cargo tree -i <crate>` first and keep
   `Cargo.lock` in the commit.
 - **No `unsafe`.** Every crate starts with `#![forbid(unsafe_code)]`.
-- **CI gate.** GitHub Actions runs `cargo check --workspace --all-targets` and
-  `cargo test --workspace` on Linux (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
-  `clippy` and `rustfmt` are expected locally when available.
+- **CI gate.** GitHub Actions and GitLab CI both run
+  `cargo check --workspace --all-targets` and `cargo test --workspace` on Linux. See
+  [`.github/workflows/ci.yml`](.github/workflows/ci.yml) and
+  [`.gitlab-ci.yml`](.gitlab-ci.yml). `clippy` and `rustfmt` are expected locally when
+  available.
 - **Demo content is generated**, not vendored: Lucid redistributes no third-party
   documentation.
 - **Pull requests are welcome.** Keep the frozen APIs in `docs/DESIGN.md` in sync and add a
   test for every parser or ranking change.
 
 The banner, app icon and screenshots are described in [`assets/README.md`](assets/README.md).
+
+## Releases
+
+Release archives are built from tags:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+GitHub Actions publishes Linux x86_64, macOS x86_64/arm64 and Windows x86_64 archives
+(each containing `lucid`, `lucid-forge`, `README.md`, `LICENSE` and `CHANGELOG.md`) plus
+`SHA256SUMS.txt`.
+GitLab CI builds the Linux archive as a tagged pipeline artifact. The workflow refuses a tag
+whose version differs from `Cargo.toml`.
 
 ## Roadmap
 

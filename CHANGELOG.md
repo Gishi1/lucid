@@ -6,7 +6,9 @@ All notable changes to Lucid are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.1.0] — 2026-10-27
+## [1.0.0] — 2026-10-27
+
+First public release. The 0.1.0 milestone was internal.
 
 ### Added
 
@@ -31,3 +33,5 @@ All notable changes to Lucid are documented here. The format follows
 - MSRV is Rust 1.86. `Cargo.lock` pins `image`, `zip` and the `icu_*` chain to versions
   that still build on it.
 - Every crate is `#![forbid(unsafe_code)]`.
+- Release archives are built for Linux x86_64, macOS x86_64/arm64 and Windows x86_64 by the
+  `v*` tag workflow.
