@@ -28,9 +28,6 @@ default:
     paths:
       - .cargo/
       - target/
-  variables:
-    CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
-    CARGO_TERM_COLOR: always
   before_script:
     - apt-get update
     - >-
@@ -38,6 +35,10 @@ default:
       pkg-config
       libxkbcommon-dev libwayland-dev libx11-dev libxi-dev
       libgl1-mesa-dev libxcursor-dev libxrandr-dev libxinerama-dev
+
+variables:
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  CARGO_TERM_COLOR: always
 
 check:
   stage: check
