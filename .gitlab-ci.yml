@@ -3,11 +3,18 @@
 # The project is hosted on GitHub, but the same check/test gate and a tagged Linux build
 # run on GitLab without changes. GitLab-specific features (FUNDING.yml, GitHub release
 # assets) are simply ignored by GitLab.
+#
+# Release flow:
+#   1. GitHub Actions builds and publishes the Linux/macOS/Windows archives on the tag.
+#   2. GitLab builds Linux natively and mirrors the macOS/Windows archives from the
+#      GitHub release into the GitLab Generic Package Registry (permanent, no expiry).
+#   3. The GitLab release links all four archives plus SHA256SUMS.txt.
 
 stages:
   - check
   - test
   - package
+  - publish
   - release
 
 workflow:
@@ -32,7 +39,7 @@ default:
     - apt-get update
     - >-
       apt-get install -y --no-install-recommends
-      pkg-config
+      curl pkg-config
       libxkbcommon-dev libwayland-dev libx11-dev libxi-dev
       libgl1-mesa-dev libxcursor-dev libxrandr-dev libxinerama-dev
 
@@ -63,26 +70,78 @@ package:
     - cp target/release/lucid target/release/lucid-forge README.md LICENSE CHANGELOG.md "dist/${name}/"
     - tar -czf "dist/${name}.tar.gz" -C dist "${name}"
   artifacts:
-    name: "lucid-${CI_COMMIT_TAG}"
+    name: "lucid-${CI_COMMIT_TAG}-linux"
     paths:
       - dist/*.tar.gz
     expire_in: 1 week
 
+publish:
+  stage: publish
+  needs: ["package"]
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - version="${CI_COMMIT_TAG#v}"
+    - mkdir -p release
+    - cp "dist/lucid-${version}-x86_64-unknown-linux-gnu.tar.gz" release/
+    - |
+      ready=0
+      for attempt in $(seq 1 60); do
+        missing=0
+        for f in \
+          "lucid-${version}-aarch64-apple-darwin.tar.gz" \
+          "lucid-${version}-x86_64-apple-darwin.tar.gz" \
+          "lucid-${version}-x86_64-pc-windows-msvc.zip" \
+          "SHA256SUMS.txt"; do
+          if ! curl -fsSIL "https://github.com/Gishi1/lucid/releases/download/${CI_COMMIT_TAG}/${f}" >/dev/null; then
+            missing=1
+            break
+          fi
+        done
+        if [ "${missing}" = "0" ]; then ready=1; break; fi
+        echo "Waiting for GitHub release assets (attempt ${attempt}/60)..."
+        sleep 20
+      done
+      test "${ready}" = "1"
+    - |
+      for f in \
+        "lucid-${version}-aarch64-apple-darwin.tar.gz" \
+        "lucid-${version}-x86_64-apple-darwin.tar.gz" \
+        "lucid-${version}-x86_64-pc-windows-msvc.zip" \
+        "SHA256SUMS.txt"; do
+        curl -fsSL "https://github.com/Gishi1/lucid/releases/download/${CI_COMMIT_TAG}/${f}" -o "release/${f}"
+      done
+    - cd release
+    - grep -v 'x86_64-unknown-linux-gnu' SHA256SUMS.txt > SHA256SUMS.github
+    - sha256sum -c SHA256SUMS.github
+    - sha256sum lucid-*.tar.gz lucid-*.zip > SHA256SUMS.txt
+    - |
+      for f in lucid-*.tar.gz lucid-*.zip SHA256SUMS.txt; do
+        echo "Uploading ${f}"
+        curl --fail --silent --show-error \
+          --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+          --upload-file "${f}" \
+          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/lucid/${CI_COMMIT_TAG}/${f}"
+      done
+
 release:
   stage: release
   image: registry.gitlab.com/gitlab-org/release-cli:latest
-  needs: ["package"]
+  needs: ["publish"]
   before_script: []
   cache: {}
   rules:
     - if: $CI_COMMIT_TAG
   script:
-    - echo "Creating GitLab release ${CI_COMMIT_TAG}"
-  release:
-    tag_name: "$CI_COMMIT_TAG"
-    name: "Lucid $CI_COMMIT_TAG"
-    description: "See CHANGELOG.md in the repository."
-    assets:
-      links:
-        - name: "Linux x86_64 build artifacts"
-          url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/download?job=package"
+    - version="${CI_COMMIT_TAG#v}"
+    - base="${CI_PROJECT_URL}/-/packages/generic/lucid/${CI_COMMIT_TAG}"
+    - |
+      release-cli create \
+        --name "Lucid ${CI_COMMIT_TAG}" \
+        --tag-name "${CI_COMMIT_TAG}" \
+        --description "See CHANGELOG.md. Linux, macOS and Windows archives are attached below; verify them with SHA256SUMS.txt." \
+        --assets-link "{\"name\":\"Linux x86_64\",\"url\":\"${base}/lucid-${version}-x86_64-unknown-linux-gnu.tar.gz\"}" \
+        --assets-link "{\"name\":\"macOS arm64\",\"url\":\"${base}/lucid-${version}-aarch64-apple-darwin.tar.gz\"}" \
+        --assets-link "{\"name\":\"macOS x86_64\",\"url\":\"${base}/lucid-${version}-x86_64-apple-darwin.tar.gz\"}" \
+        --assets-link "{\"name\":\"Windows x86_64\",\"url\":\"${base}/lucid-${version}-x86_64-pc-windows-msvc.zip\"}" \
+        --assets-link "{\"name\":\"SHA256SUMS.txt\",\"url\":\"${base}/SHA256SUMS.txt\"}"

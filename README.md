@@ -254,8 +254,10 @@ git push origin v1.0.0
 GitHub Actions publishes Linux x86_64, macOS x86_64/arm64 and Windows x86_64 archives
 (each containing `lucid`, `lucid-forge`, `README.md`, `LICENSE` and `CHANGELOG.md`) plus
 `SHA256SUMS.txt`.
-GitLab CI builds the Linux archive as a tagged pipeline artifact. The workflow refuses a tag
-whose version differs from `Cargo.toml`.
+GitLab CI builds Linux natively and mirrors the macOS/Windows archives from the GitHub
+release into the GitLab Generic Package Registry, so the GitLab release also links all four
+archives plus checksums. Both workflows refuse a tag whose version differs from
+`Cargo.toml`.
 
 ## Roadmap
 

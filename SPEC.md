@@ -180,7 +180,8 @@ forces a rebuild (silently, in the background).
    `docs/DESIGN.md` stays the single source of truth for format decisions.
 8. Tagging `v1.0.0` produces release archives for Linux x86_64, macOS x86_64/arm64 and
    Windows x86_64; each contains `lucid`, `lucid-forge`, `README.md`, `LICENSE` and
-   `CHANGELOG.md`, and the tag matches the workspace version.
+   `CHANGELOG.md`, and the tag matches the workspace version. GitLab publishes the same
+   set from its package registry.
 
 ## 9. Assumptions & open questions
 
