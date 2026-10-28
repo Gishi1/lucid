@@ -1,110 +1,164 @@
-# Lucid
+<p align="center">
+  <img src="assets/banner.png" alt="Lucid — offline documentation, at native speed" width="100%">
+</p>
 
-**A fast, modern reader — and packer — for Microsoft Help Container (`.mshc`) documentation.**
+<p align="center">
+  <a href="https://ko-fi.com/gishi"><img src="https://img.shields.io/badge/Ko--fi-Support%20Lucid-FF5E5B?style=flat-square&logo=ko-fi&logoColor=white" alt="Support Lucid on Ko-fi"></a>
+  <img src="https://img.shields.io/badge/rust-1.86%2B-4F8CFF?style=flat-square&logo=rust&logoColor=white" alt="Rust 1.86 or newer">
+  <img src="https://img.shields.io/badge/license-MIT-34D399?style=flat-square" alt="MIT license">
+  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-64748B?style=flat-square" alt="Linux, macOS and Windows">
+</p>
 
-Lucid opens the offline help format that Visual Studio ships (`MSHC` / *MS Help 3*, the format
-described on [10tec.com/net-documentation-tool/microsoft-help-viewer-mshc.aspx](https://10tec.com/net-documentation-tool/microsoft-help-viewer-mshc.aspx))
-without Visual Studio, without the .NET Framework, and without an embedded browser engine.
-It is a native Rust application: one binary, a fast window, and a search engine that is
-genuinely better than the classic Help Viewer index.
+<h3 align="center">Read, search and build Microsoft Help — without Visual Studio.</h3>
 
-```
-lucid demo testdata/demo-help.mshc      # write the built-in demo package
-lucid testdata/demo-help.mshc           # read it
-```
+<p align="center">
+  Lucid is a native <b>MSHC</b> reader, search engine and packer written in Rust.<br>
+  One binary. No .NET runtime, no embedded browser, no index you have to wait for.
+</p>
 
-Status: **v0.1** — reading, searching, browsing, exporting and packing all work; see
-[`SPEC.md`](SPEC.md) for the acceptance criteria and [`docs/DESIGN.md`](docs/DESIGN.md) for
-the format notes and architecture.
+<p align="center">
+  <sub><b>v0.1</b> — reading, search, export and packing all work. Acceptance criteria live in
+  <a href="SPEC.md">SPEC.md</a>.</sub>
+</p>
+
+<p align="center">
+  <a href="#screenshots">Screenshots</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#what-it-does">Features</a> ·
+  <a href="#search">Search</a> ·
+  <a href="#command-line">Command line</a> ·
+  <a href="#format-support">Format support</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#support-lucid">Support ❤</a>
+</p>
 
 ---
 
+## Why Lucid?
+
+Microsoft Help Container (`.mshc`, *MS Help 3*) is the offline documentation format that ships
+with Visual Studio, Help Viewer and Sandcastle/SHFB. The official viewer is a .NET application
+with an embedded browser and a flat keyword index. Lucid replaces it with a native window,
+a ranked full-text engine and a packer, in a single Rust binary.
+
+- **Opens what you have.** A single `.mshc`, a whole Help Library `ContentStore/<LOCALE>`
+  folder, or a `.msha` setup document — merged into one searchable library.
+- **Renders what authors wrote.** SHFB and Sandcastle pages, collapsible areas, code snippets
+  with language tabs, `languageSpecificText`, tables, callouts, images and cross-package links.
+- **Searches like a modern editor.** BM25F ranking, phrases, prefixes, fuzzy fallback, field
+  filters and highlighted snippets — backed by an index that persists between runs.
+- **Packs it back.** `lucid-forge` builds valid, byte-for-byte reproducible `.mshc` packages
+  from a folder of HTML.
+
+## Screenshots
+
+<p align="center">
+  <img src="assets/screenshots/reading-dark.png" alt="Lucid reading a topic in the dark theme, with contents and outline panes" width="100%">
+</p>
+
+<p align="center">
+  <sub>The reader: contents, one topic and its outline — callouts, collapsible sections and code rendered natively.</sub>
+</p>
+
+| Search as you type | Light theme |
+| :---: | :---: |
+| [<img src="assets/screenshots/search.png" alt="Ranked search results with field filters and highlighted snippets">](assets/screenshots/search.png) | [<img src="assets/screenshots/reading-light.png" alt="The same topic in Lucid's light theme">](assets/screenshots/reading-light.png) |
+| Ranked hits, filter chips and exact snippet highlights | The same documentation in the light palette |
+
+<sub>All screenshots use the self-authored demo package written by `lucid demo testdata/demo-help.mshc`. No third-party documentation is bundled with Lucid.</sub>
+
+## Quick start
+
+Rust 1.86 or newer is required. On Linux, install the usual X11/Wayland/OpenGL development
+headers — Lucid needs no GTK, no WebKit and no .NET:
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxi-dev \
+    libgl1-mesa-dev libxcursor-dev libxrandr-dev libxinerama-dev
+```
+
+```bash
+git clone https://github.com/gishi/lucid.git
+cd lucid
+cargo run --release -- testdata/demo-help.mshc
+```
+
+Or build once and run the binary directly:
+
+```bash
+cargo build --release
+./target/release/lucid --help
+```
+
+Open your own documentation the same way:
+
+```bash
+lucid help.mshc                                  # one package
+lucid path/to/HelpLibrary/ContentStore/en-US     # a whole content store
+lucid setup.msha                                 # a setup document
+lucid help.mshc --f1 System.String               # resolve an F1 keyword
+```
+
+The window opens maximized. `--size 1280x800` pins an exact size, `--theme light|dark`
+overrides the palette, and `--screenshot out.png` renders once and exits (used for the images
+above and for layout checks during development).
+
 ## What it does
 
-**Reading**
+### Read
 
-* Opens a single `.mshc`, a **folder** of them (a Help Library `ContentStore/<LOCALE>`
-  directory), or a `.msha` setup document — and merges the whole content set into one library.
-* Rebuilds the table of contents from the manifest *and* from the `Microsoft.Help.*` meta tags,
-  so packages from any authoring tool (DocMounter, Sandcastle/SHFB, hand-rolled) work, and a
-  topic the manifest forgot still appears.
-* Renders topics natively: headings, lists, tables, code, notes, images, and the Microsoft Help
-  behaviours `CollapsibleArea`, `CodeSnippet` (with copy + language tabs),
-  `LanguageSpecificText`, `InheritedMember`.
-* Resolves `ms-xhelp:///?Id=…` links, relative links, `#anchors` and cross-package links;
-  opens external URLs in your browser.
-* Tabs, per-topic outline ("On this page"), in-topic find with highlighting, zoom,
-  bookmarks with history, dark and light themes.
+- Tabs, history and bookmarks; `Alt+←` / `Alt+→` walk the reading history.
+- A per-topic **On this page** outline, in-topic find with highlighting, and zoom.
+- Dark and light palettes with a document surface tuned separately from the chrome.
+- A filterable contents tree, an index pane with multi-select keywords, and `F1` keywords
+  highlighted in green for context-sensitive help.
+- Drag and drop a package, folder or `.msha` anywhere in the window.
+- `ms-xhelp:///?Id=…`, relative links, `#anchors` and cross-package links resolve inside the
+  viewer; external URLs open in your browser.
 
-**Searching** (the part that was worth rewriting)
+### Search
 
-| You type | You get |
+Search-as-you-type over the whole content set, with results grouped by package and a
+**persisted index** in `$XDG_CACHE_HOME/lucid/index/<fingerprint>.idx`. Reopening a book is
+instant; `F5` rebuilds the index when you change the source.
+
+| Query | Meaning |
 | --- | --- |
-| `install` | ranked hits, field-weighted (title ≫ keywords > body > code) |
-| `phrase search` | both words required |
-| `"phrase search"` | exact adjacency, same field |
-| `sear*` | prefix match (the last word is automatically a prefix while you type) |
+| `install` | ranked hits, title ≫ keywords > headings > body > code |
+| `phrase search` | both terms required |
+| `"phrase search"` | exact adjacency, in the same field |
+| `sear*` | prefix match (the last word is also a prefix automatically) |
 | `serach~` | fuzzy match, ranked below exact hits |
 | `-legacy` | exclusion |
 | `search OR index` | union |
-| `title:install`, `body:"getting started"`, `code:DocSet`, `kw:setup`, `id:…`, `path:…` | field filters |
+| `title:install` · `body:"getting started"` | field filters |
+| `code:DocSet` · `kw:setup` · `id:…` · `path:…` | field filters |
 
-Search-as-you-type, snippets with exact highlight ranges, filter chips, per-package scope,
-sort by relevance/title/path, "did you mean" suggestions, and a **persisted index**
-(`$XDG_CACHE_HOME/lucid/index/<fingerprint>.idx`) so reopening a book is instant.
+Ranking is BM25F with per-field weights; results carry exact highlight ranges, filter chips,
+per-package scope, sorting by relevance/title/path, and "did you mean" suggestions when nothing
+matches.
 
-**Packing** — `lucid-forge` builds valid packages from a folder of topic HTML:
+### Pack
 
-```
+`lucid-forge` reads a folder of topic HTML, collects the `Microsoft.Help.*` meta tags,
+synthesizes the `HelpContentSet` manifest and writes the OPC parts:
+
+```bash
 lucid-forge build ./docs -o Product.mshc --title "Product docs" --locale en-us
 lucid-forge validate Product.mshc
 lucid-forge outline Product.mshc
 ```
 
-It copies your tree verbatim, reads the meta tags, synthesizes the `HelpContentSet` manifest,
-writes the OPC parts (`[Content_Types].xml`, `_rels/.rels`) and is **byte-for-byte
-reproducible**: the same input produces the same package.
-
----
-
-## Install / build
-
-Rust 1.86 or newer, no system development packages needed (no GTK, no WebKit):
-
-```bash
-git clone <this repo> lucid && cd lucid
-cargo build --release
-./target/release/lucid --help
-```
-
-Dependencies are pinned deliberately (see *Development notes*): the window stack is
-`eframe`/`egui` 0.32 (OpenGL, Wayland/X11), the format layer uses `zip` + `roxmltree`, and the
-search engine is written from scratch.
-
-## Using the GUI
-
-| Keys | Action |
-| --- | --- |
-| `Ctrl+O` | open a package, folder or setup document |
-| `Ctrl+P` | go to a topic by title (fuzzy) |
-| `Ctrl+K` | focus search |
-| `Ctrl+F` | find inside the current topic (`Enter`/`▲`/`▼`, `Aa` for case) |
-| `Ctrl+W` | close tab · **Ctrl+D** bookmark |
-| `Alt+←/→` | history back/forward |
-| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | zoom in/out/reset |
-| `F5` | rebuild the search index |
-
-Panes: **Contents** (filterable tree), **Index** (keywords, multi-select, `F1` keywords in
-green), **Search** (results, snippets, suggestions), **Favorites** (bookmarks + history).
-Drag and drop works anywhere in the window, and the right-hand pane shows the outline of the
-open topic.
+The same input produces the same bytes: packages are deterministic, so they can be committed,
+diffed and reproduced.
 
 ## Command line
 
-```
+```text
 lucid [<path>] [--topic <id>] [--search <term>] [--f1 <keyword>] [--no-index]
-             [--pane contents|index|search|favorites] [--theme dark|light]
-             [--size WxH] [--no-maximize] [--screenshot out.png] [--frames N]
+      [--pane contents|index|search|favorites] [--theme dark|light]
+      [--size WxH] [--no-maximize] [--screenshot out.png] [--frames N]
 lucid info <path> [--json]
 lucid toc <path> [--depth N]
 lucid search <path> <query> [--limit N] [--json]
@@ -113,33 +167,39 @@ lucid demo <out.mshc> [--force]
 lucid --version | --help
 ```
 
-Exit codes: `0` success, `1` I/O or format error, `2` usage, `3` nothing found.
-`lucid --topic <id>` and `lucid --f1 <keyword>` are the hooks for context-sensitive help
-(`F1`) in your own application.
+| Command | Purpose |
+| --- | --- |
+| `lucid info` | packages, topics, TOC and index statistics |
+| `lucid toc` | ASCII table of contents |
+| `lucid search` | ranked results with snippets (`--json` for tooling) |
+| `lucid extract` | unpack topics and assets |
+| `lucid demo` | write the self-authored demo package |
+| `lucid --f1 <keyword>` | resolve an F1 keyword and open that topic |
 
-The window opens maximized; `--size 1280x800` pins an exact size instead. `--screenshot`
-renders the GUI, writes a PNG and exits, which is how the layouts are checked at 900×600
-through 2560×1368 without a human at the keyboard:
-
-```
-lucid testdata/demo-help.mshc --size 900x600 --screenshot /tmp/lucid-900.png
-lucid testdata/demo-help.mshc --theme light --pane search --search bm25 --screenshot /tmp/lucid-search.png
-```
+Exit codes: `0` success · `1` I/O or format error · `2` usage error · `3` topic or keyword not
+found. `--topic <id>` and `--f1 <keyword>` are the hooks for context-sensitive help from your
+own application.
 
 ## Format support
 
 | Input | Status |
 | --- | --- |
-| `.mshc` (DocMounter, Help Viewer 1.0/2.x, SHFB/Sandcastle output) | full support |
+| `.mshc` (DocMounter, Help Viewer 1.x/2.x, SHFB/Sandcastle output) | full support |
 | Content-store folder (`ContentStore/<LOCALE>`) | full support, merged into one library |
 | `.msha` setup document | package discovery |
 | `.mshi` / `.metadata` sidecars | best effort |
 | `.cab` content packages | detected with an actionable error (extract first) |
 | CHS/HxS (`*.hxs`), CHM | roadmap |
 
-## Repository layout
+The renderer understands the legacy markup that real packages contain: `div.pageHeader` /
+`pageFooter`, `table.titleTable`, `div.codeSnippetContainer` with `ChangeTab`, Sandcastle
+`div.code` blocks, `collapsibleAreaRegion` / `collapsibleSection`, `languageSpecificText`
+(`cs=.|vb=.|cpp=::|nu=.`), and block-level `<br>`. Details and the compatibility rationale are
+in [`docs/DESIGN.md`](docs/DESIGN.md) §2.3.
 
-```
+## Architecture
+
+```text
 crates/lucid-mshc    format core: zip/OPC → packages → topics, TOC, keywords, assets, content sets
 crates/lucid-search  inverted index + BM25F, query language, snippets, suggestions, persistence
 crates/lucid-forge   the packer (library + CLI) and the demo-package generator
@@ -149,38 +209,60 @@ SPEC.md / PLAN.md    requirements, acceptance criteria and the implementation pl
 testdata/            demo-help.mshc — committed, self-authored sample package
 ```
 
+| Crate | Role |
+| --- | --- |
+| `lucid-mshc` | MSHC parsing: packages, content sets, TOC/index reconstruction, assets |
+| `lucid-search` | ranked, instant full-text search: BM25F, phrases, prefixes, fuzzy, snippets |
+| `lucid-forge` | MSHC packer and validator; builds valid OPC + `HelpContentSet` packages |
+| `lucid` | native egui application, reader, panes and the headless command line |
+
 ## Development
 
 ```bash
-cargo test --workspace          # parser, TOC, index, ranking, packer round-trips
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --all
+cargo check --workspace --all-targets     # warning-free gate
+cargo test --workspace                    # parser, TOC, index, ranking, packer round-trips
 cargo run -p lucid-forge -- demo testdata/demo-help.mshc --force   # regenerate the sample
 ```
 
-Notes worth knowing before you touch dependencies:
+Notes for contributors:
 
-* **MSRV is 1.86 here.** `image`, `zip` and the `icu_*` chain are pinned for it: newer
-  releases require rustc 1.88+, and `eframe → egui-winit → webbrowser → url → idna → icu_*`
-  is not something an application can opt out of. `Cargo.lock` therefore carries
-  `icu_* = 2.2.0` (the newest icu that still supports 1.86) — if you bump one of these, run
-  `cargo tree -i <crate>` first and keep the lock file in the commit.
-* **No `unsafe`**: every crate starts with `#![forbid(unsafe_code)]`.
-* `cargo clippy`/`cargo fmt` are expected in CI but are not part of this machine's rustc
-  installation; here the gate is a warning-free `cargo check --workspace --all-targets`
-  plus `cargo test --workspace`.
-* The demo package is generated (`lucid demo`), not vendored: no third-party documentation is
-  redistributed with Lucid.
+- **MSRV is 1.86.** `image`, `zip` and the `icu_*` chain are pinned for it; newer releases
+  require rustc 1.88+. If you bump one, run `cargo tree -i <crate>` first and keep
+  `Cargo.lock` in the commit.
+- **No `unsafe`.** Every crate starts with `#![forbid(unsafe_code)]`.
+- **CI gate.** GitHub Actions runs `cargo check --workspace --all-targets` and
+  `cargo test --workspace` on Linux (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
+  `clippy` and `rustfmt` are expected locally when available.
+- **Demo content is generated**, not vendored: Lucid redistributes no third-party
+  documentation.
+- **Pull requests are welcome.** Keep the frozen APIs in `docs/DESIGN.md` in sync and add a
+  test for every parser or ranking change.
+
+The banner, app icon and screenshots are described in [`assets/README.md`](assets/README.md).
 
 ## Roadmap
 
-Short version: in-process `.cab` support, syntax highlighting for code snippets, PDF/EPUB
-export, CSS subset support, optional semantic (embedding) search, CHM/HxS import, and a GUI
-authoring mode. Details and ordering live in [`docs/DESIGN.md`](docs/DESIGN.md) §7.
+In-process `.cab` support, syntax highlighting for code snippets, a CSS subset, PDF/EPUB
+export, optional semantic search, CHM/HxS import and a GUI authoring mode. The order and the
+reasoning live in [`docs/DESIGN.md`](docs/DESIGN.md) §7; the acceptance criteria are in
+[`SPEC.md`](SPEC.md).
+
+## Support Lucid
+
+Lucid is independent, MIT-licensed and developed in the open. If it saves you time, you can
+support its development on Ko-fi:
+
+<p align="center">
+  <a href="https://ko-fi.com/gishi"><img src="https://img.shields.io/badge/Support%20Lucid%20on%20Ko--fi-ko--fi.com%2Fgishi-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Support Lucid on Ko-fi — ko-fi.com/gishi"></a>
+</p>
+
+<p align="center"><b><a href="https://ko-fi.com/gishi">ko-fi.com/gishi</a></b></p>
+
+Every contribution pays for the time that goes into the next release. If you cannot donate,
+a star, a bug report or a package that fails to open is just as useful.
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE). The Lucid name, the demo content and the code are original;
-the `.mshc` format belongs to Microsoft, and the product this re-makes is 10Tec's
-[Help Viewer](https://10tec.com/help-viewer/) (Windows/.NET), which Lucid is not affiliated
-with.
+MIT — see [`LICENSE`](LICENSE). Microsoft, Visual Studio, Windows and Help Viewer are
+trademarks of Microsoft Corporation. Lucid is not affiliated with Microsoft; the `.mshc` format
+is Microsoft's, while the Lucid code, name and demo content are original.

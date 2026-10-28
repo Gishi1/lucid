@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "Lucid — fast, modern MSHC help viewer (GUI + headless CLI)"
 
 [[bin]]
