@@ -34,4 +34,4 @@ First public release. The 0.1.0 milestone was internal.
   that still build on it.
 - Every crate is `#![forbid(unsafe_code)]`.
 - Release archives are built for Linux x86_64, macOS x86_64/arm64 and Windows x86_64 by the
-  `v*` tag workflow.
+  `v*` tag workflow; GitLab CI mirrors the same set into its package registry.
