@@ -56,6 +56,7 @@ package:
   rules:
     - if: $CI_COMMIT_TAG
   script:
+    - cargo build --release --locked -p lucid -p lucid-forge
     - version="${CI_COMMIT_TAG#v}"
     - name="lucid-${version}-x86_64-unknown-linux-gnu"
     - mkdir -p "dist/${name}"
