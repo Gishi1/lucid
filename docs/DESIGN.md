@@ -538,11 +538,13 @@ Exit codes: 0 ok, 1 IO/format error, 2 bad usage, 3 topic/keyword not found.
 
 ## 7. Roadmap
 
-- **v1.1** — in-process `.cab` support (MU/VS content packages) and `.mshi` catalogs;
+- **v1.1** — read-only CHM support (shipped): ITSF/LZX decoding, `#SYSTEM` metadata, HHC
+  contents, HHK index, CHM link forms.
+- **v1.2** — in-process `.cab` support (MU/VS content packages) and `.mshi` catalogs;
   syntax highlighting for code snippets (syntect, lazy per language); export topic/whole
   book to PDF; print layout; CSS subset (`font-weight`, `color`, `text-align`, borders of
   `table.alert`); SVG assets (resvg).
-- **v1.2** — semantic search (optional local embeddings + hybrid rerank), "similar topics",
+- **v1.3** — semantic search (optional local embeddings + hybrid rerank), "similar topics",
   per-topic summaries; saved searches; multi-window; localization of the UI.
 - **v2.0** — HxS (Help 2.x) import so legacy content can be republished as MSHC; GUI
   authoring (a real DocMounter alternative).
