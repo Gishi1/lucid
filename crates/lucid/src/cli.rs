@@ -1,7 +1,7 @@
 //! Argument parsing and the headless commands (`docs/DESIGN.md` §6).
 //!
-//! The GUI is the default; everything else is a subcommand so that `lucid book.mshc` stays a
-//! one-keystroke way to open a package.
+//! The GUI is the default; everything else is a subcommand so that `lucid book.mshc` or
+//! `lucid book.chm` stays a one-keystroke way to open a package.
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use crate::load::build_index;
 
 /// Usage text (also shown by `lucid --help`).
 pub const USAGE: &str = "\
-lucid — read and search MSHC (Microsoft Help Container) documentation
+lucid — read and search MSHC (Microsoft Help Container) and CHM (Compiled HTML Help) documentation
 
 USAGE:
     lucid [<path>] [--topic <id>] [--search <term>] [--f1 <keyword>] [--no-index]

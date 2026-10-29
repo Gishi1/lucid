@@ -197,7 +197,8 @@ impl OpenDialog {
                 .extension()
                 .map(|ext| ext.to_string_lossy().to_ascii_lowercase())
                 .unwrap_or_default();
-            let interesting = is_dir || matches!(ext.as_str(), "mshc" | "msha" | "mshi" | "cab");
+            let interesting =
+                is_dir || matches!(ext.as_str(), "mshc" | "chm" | "msha" | "mshi" | "cab");
             if interesting {
                 self.entries.push((name, is_dir));
             }
@@ -443,6 +444,7 @@ impl LucidApp {
         let packages = loaded.set.packages.len();
         let mut status = match loaded.set.kind {
             lucid_mshc::SourceKind::Package => "single package".to_owned(),
+            lucid_mshc::SourceKind::Chm => "CHM archive".to_owned(),
             lucid_mshc::SourceKind::Folder => format!(
                 "content set · {packages} package{}",
                 if packages == 1 { "" } else { "s" }
@@ -1642,11 +1644,13 @@ impl LucidApp {
         ui.vertical_centered(|ui| {
             ui.label(RichText::new("Lucid").size(34.0).strong());
             ui.label(
-                RichText::new("A fast, modern reader for Microsoft Help Container (.mshc) packages")
+                RichText::new(
+                    "A fast, modern reader for MSHC (.mshc) and CHM (.chm) documentation",
+                )
                     .color(theme::muted(ui.ctx())),
             );
             ui.add_space(20.0);
-            if ui.button("Open a package, folder or setup document…").clicked() {
+            if ui.button("Open a package, CHM, folder or setup document…").clicked() {
                 actions.push(Action::ShowOpenDialog);
             }
             ui.add_space(4.0);
@@ -2153,7 +2157,9 @@ impl LucidApp {
                         for (name, is_dir) in &dialog.entries {
                             let label = if *is_dir {
                                 format!("📁 {name}")
-                            } else if name.to_lowercase().ends_with(".mshc") {
+                            } else if name.to_lowercase().ends_with(".mshc")
+                                || name.to_lowercase().ends_with(".chm")
+                            {
                                 format!("📦 {name}")
                             } else {
                                 format!("📄 {name}")
@@ -2243,7 +2249,7 @@ impl LucidApp {
             .resizable(false)
             .show(ctx, |ui| {
                 ui.label(RichText::new(format!("Lucid {}", env!("CARGO_PKG_VERSION"))).strong());
-                ui.label("A fast, modern viewer for Microsoft Help Container (.mshc) packages.");
+                ui.label("A fast, modern viewer for MSHC (.mshc) and CHM (.chm) documentation.");
                 ui.separator();
                 ui.label("Contents, Index, Search and Favorites panes; ranked search with phrases, prefixes, fuzzy matching and field filters; native topic rendering — no browser engine, no .NET.");
                 ui.separator();
@@ -2543,7 +2549,7 @@ impl LucidApp {
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
-                "Drop a .mshc package, folder or .msha setup document",
+                "Drop a .mshc package, .chm archive, folder or .msha setup document",
                 egui::FontId::proportional(20.0),
                 Color32::WHITE,
             );

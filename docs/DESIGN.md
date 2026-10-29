@@ -3,8 +3,9 @@
 A fast, modern, cross-platform re-make of the 10Tec "Help Viewer for MSHC files"
 (`https://10tec.com/help-viewer/`): a viewer for **Microsoft Help Container (.mshc)**
 documentation — the help format introduced with Microsoft Help Viewer 1.0 / VS 2010
-(a.k.a. "MSHelp3"/"Help 2.x content") — plus a native **packer** so the same format can
-be authored without Visual Studio or DocMounter.
+(a.k.a. "MSHelp3"/"Help 2.x content") — and for **Compiled HTML Help (.chm)** archives
+(Help 1.x), plus a native **packer** so the MSHC format can be authored without Visual
+Studio or DocMounter.
 
 Everything is Rust. The viewer is a single native binary (egui/eframe, no web engine, no
 runtime dependency beyond the GPU/OS windowing stack), the search engine is written from
@@ -17,9 +18,10 @@ topic HTML.
 
 **Goals**
 
-1. Open `.mshc` packages and *content sets* (folders of `.mshc`, e.g. a Help Library
-   `ContentStore\EN-US` directory) and present them like Microsoft Help Viewer does:
-   Contents / Index / Search / Favorites panes + topic browser with a real toolbar.
+1. Open `.mshc` packages, `.chm` archives and *content sets* (folders of `.mshc`/`.chm`,
+   e.g. a Help Library `ContentStore\EN-US` directory) and present them like Microsoft
+   Help Viewer does: Contents / Index / Search / Favorites panes + topic browser with a
+   real toolbar.
 2. Be *tolerant*: MSHC packages are produced by many authoring tools (DocMounter,
    Sandcastle, SHFB, Word→MSHC converters, VS itself). The parser accepts every layout
    variant we know of and degrades gracefully instead of failing to open a package.
@@ -66,6 +68,7 @@ Additional deployment formats we accept:
 - **`.cab`** — VS content packages are cab files containing `.mshc`. Lucid detects cab
   magic bytes and reports a clear "extract with cabextract/unshield first" error
   instead of a confusing zip error. (In-process cab support is on the roadmap.)
+- **`.chm`** — Compiled HTML Help (Help 1.x). Read-only; see §2.7.
 
 ### 2.2 Topic metadata (the contract)
 
@@ -155,17 +158,42 @@ Help-Viewer feature that is genuinely useful) and copy.
 - Multiple topics may share an id when their `TopicLocale` differs; the locale matching
   the active locale wins for the TOC, all locales remain reachable in search.
 
+### 2.7 CHM (Compiled HTML Help) support
+
+CHM is the Help 1.x format: an ITSF/ITSS archive whose logical parts live in `#SYSTEM`,
+`#STRINGS`, `::DataSpace/...` and one or more LZX-compressed `MSCompressed` sections.
+Lucid opens it **read-only**; it never writes or recompiles a CHM.
+
+- `#SYSTEM` metadata is decoded into title (3), locale (4, LCID), contents file (0),
+  index file (1), default topic (2), default window (5), compiler version (9) and default
+  font (16). Title and locale seed the package before topic scanning, exactly like an
+  MSHC manifest does.
+- The HHC contents file and HHK index file are HTML-ish sitemaps; they are parsed with
+  the same tolerant lexer used for topics and converted into a `RawManifest`, so the TOC
+  and keyword builders in §2.4–2.5 run unchanged.
+- Internal parts (`#SYSTEM`, `#STRINGS`, `::DataSpace/...`) are readable through the
+  store but are not listed as content, so they never show up as topics or assets.
+- Link forms `ms-its:book.chm::/topic.htm`, `ms-itss:…`, `mk:@MSITStore:C:\path\book.chm::/topic.htm`
+  and `book.chm::/topic.htm#anchor` resolve against the open content set; the book name is
+  ignored and the topic path is matched case-insensitively. `#anchors` are preserved.
+- CHM decoding uses a vendored copy of `libchm` 0.3.0 (MIT). Upstream requires Rust 1.87;
+  the vendored copy carries only MSRV substitutions (`cast_unsigned`, `cast_signed`,
+  `is_multiple_of`, const `Vec::len`) and module-path changes. It is isolated behind
+  `ChmStore` and the `Store` enum, so `Package` stays format-agnostic.
+- The committed fixture `testdata/demo-help.chm` is self-authored (HTML + HHC + HHK packed
+  with `rustchm`); no third-party documentation is redistributed.
+
 ---
 
 ## 3. Architecture
 
 ```
-crates/lucid-mshc    format core: zip/OPC → packages → topics, TOC, keywords, assets, doc sets
+crates/lucid-mshc    format core: zip/OPC + CHM → packages → topics, TOC, keywords, assets, doc sets
 crates/lucid-search  inverted index (BM25F) + query language + snippets + suggestions + persistence
 crates/lucid-forge   MSHC packer/validator CLI (build a package from topic HTML; demo generator)
 crates/lucid         the application: egui GUI + headless CLI (`lucid info|search|toc|demo`)
 docs/                this document
-testdata/            demo packages used by tests and committed for a first-run demo
+testdata/            demo packages (MSHC + CHM) used by tests and committed for a first-run demo
 ```
 
 Data flow (GUI):
@@ -516,7 +544,7 @@ Exit codes: 0 ok, 1 IO/format error, 2 bad usage, 3 topic/keyword not found.
   `table.alert`); SVG assets (resvg).
 - **v1.2** — semantic search (optional local embeddings + hybrid rerank), "similar topics",
   per-topic summaries; saved searches; multi-window; localization of the UI.
-- **v2.0** — CHM/HxS import (ITSS/CHM decoding) so Help 1.x/2.x content can be opened and
-  republished as MSHC; GUI authoring (a real DocMounter alternative).
+- **v2.0** — HxS (Help 2.x) import so legacy content can be republished as MSHC; GUI
+  authoring (a real DocMounter alternative).
 - Cross-cutting: Nix flake + AppImage/deb packaging, fuzzing of the parser, benchmark
   suite (open 1 000-topic book, 100 k-topic content set) wired to `cargo bench`.

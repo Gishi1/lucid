@@ -1,5 +1,6 @@
-//! One `.mshc` package: part classification, topic metadata scan, keyword index, assets and
-//! TOC reconstruction.
+//! One help package: part classification, topic metadata scan, keyword index, assets and
+//! TOC reconstruction. The container is a zip (`.mshc`) or a CHM archive; both are reached
+//! through [`Store`], so everything in this module is format-agnostic.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,9 +12,10 @@ use crate::manifest::{self, RawManifest};
 use crate::meta::{self, RawMeta};
 use crate::model::{self, Document};
 use crate::progress::{Progress, Stage};
+use crate::store::Store;
 use crate::textenc;
 use crate::toc::{self, MetaItem, TocNode};
-use crate::zipread::{self, Entry, ZipStore};
+use crate::zipread::{self, Entry};
 
 /// Identifies a topic inside a content set: `(package index, topic index)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -60,7 +62,7 @@ pub struct Topic {
     pub part_size: u64,
     /// Encoding the topic was decoded from.
     pub encoding: &'static str,
-    /// Zip entry index (internal).
+    /// Entry index inside the container (internal).
     entry: usize,
 }
 
@@ -108,7 +110,7 @@ pub struct PackageStats {
     pub compressed_bytes: u64,
 }
 
-/// One `.mshc` package.
+/// One help package: a zip `.mshc` or a CHM archive.
 pub struct Package {
     pub path: PathBuf,
     pub name: String,
@@ -120,7 +122,7 @@ pub struct Package {
     pub opc: OpcInfo,
     pub warnings: Vec<String>,
 
-    store: ZipStore,
+    store: Store,
     topic_by_norm: HashMap<String, u32>,
     by_id: HashMap<String, u32>,
     duplicate_ids: Vec<(String, Vec<u32>)>,
@@ -141,8 +143,11 @@ impl std::fmt::Debug for Package {
 
 impl Package {
     /// Open a package and scan the metadata of every topic.
+    ///
+    /// The container is chosen by content: a zip (`.mshc`) or a CHM archive. Both expose
+    /// the same content-part model, so everything downstream is format-agnostic.
     pub fn open(path: &Path, pkg_index: u32, progress: &mut dyn FnMut(Progress)) -> Result<Package> {
-        let store = ZipStore::open(path)?;
+        let store = Store::open(path)?;
         progress(Progress::new(
             Stage::Opening,
             0,
@@ -199,8 +204,10 @@ impl Package {
             let rank = |e: &Entry| if e.ext() == "msha" { 0 } else { 1 };
             rank(a).cmp(&rank(b)).then_with(|| a.norm.cmp(&b.norm))
         });
-        let mut manifest = None;
-        let mut warnings: Vec<String> = Vec::new();
+        // A CHM carries its own manifest (the HHC/HHK sitemap from `#SYSTEM`); a zip is
+        // scanned for `.msha`/XML manifest parts below.
+        let mut manifest = store.manifest().cloned();
+        let mut warnings: Vec<String> = store.warnings().to_vec();
         for candidate in &manifest_candidates {
             opc.manifest_parts.push(candidate.norm.clone());
             if manifest.is_some() {
@@ -281,10 +288,12 @@ impl Package {
         let title = manifest
             .as_ref()
             .and_then(|m| m.title.clone())
+            .or_else(|| store.title())
             .or_else(|| Some(name.clone()));
         let locale = manifest
             .as_ref()
             .and_then(|m| m.locale.clone())
+            .or_else(|| store.locale())
             .or_else(|| most_common_locale(&topics));
 
         let mut package = Package {
@@ -586,14 +595,14 @@ impl Package {
         (done, warnings)
     }
 
-    /// Raw access to the container (used by `lucid extract`).
-    pub fn store(&self) -> &ZipStore {
+    /// Raw access to the container (zip or CHM).
+    pub fn store(&self) -> &Store {
         &self.store
     }
 }
 
 fn scan_topic(
-    store: &ZipStore,
+    store: &Store,
     entry_index: usize,
     entry: &Entry,
     pkg_index: u32,

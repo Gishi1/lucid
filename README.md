@@ -12,12 +12,12 @@
 <h3 align="center">Read, search and build Microsoft Help — without Visual Studio.</h3>
 
 <p align="center">
-  Lucid is a native <b>MSHC</b> reader, search engine and packer written in Rust.<br>
+  Lucid is a native <b>MSHC</b> and <b>CHM</b> reader, search engine and MSHC packer written in Rust.<br>
   One binary. No .NET runtime, no embedded browser, no index you have to wait for.
 </p>
 
 <p align="center">
-  <sub><b>v1.0</b> — reading, search, export and packing all work. Acceptance criteria live in
+  <sub><b>v1.1</b> — reading, search, export and packing all work, including CHM. Acceptance criteria live in
   <a href="SPEC.md">SPEC.md</a>.</sub>
 </p>
 
@@ -41,8 +41,9 @@ with Visual Studio, Help Viewer and Sandcastle/SHFB. The official viewer is a .N
 with an embedded browser and a flat keyword index. Lucid replaces it with a native window,
 a ranked full-text engine and a packer, in a single Rust binary.
 
-- **Opens what you have.** A single `.mshc`, a whole Help Library `ContentStore/<LOCALE>`
-  folder, or a `.msha` setup document — merged into one searchable library.
+- **Opens what you have.** A single `.mshc`, a compiled HTML Help `.chm`, a whole Help
+  Library `ContentStore/<LOCALE>` folder, or a `.msha` setup document — merged into one
+  searchable library.
 - **Renders what authors wrote.** SHFB and Sandcastle pages, collapsible areas, code snippets
   with language tabs, `languageSpecificText`, tables, callouts, images and cross-package links.
 - **Searches like a modern editor.** BM25F ranking, phrases, prefixes, fuzzy fallback, field
@@ -95,6 +96,7 @@ Open your own documentation the same way:
 
 ```bash
 lucid help.mshc                                  # one package
+lucid legacy.chm                                 # a compiled HTML Help archive
 lucid path/to/HelpLibrary/ContentStore/en-US     # a whole content store
 lucid setup.msha                                 # a setup document
 lucid help.mshc --f1 System.String               # resolve an F1 keyword
@@ -113,9 +115,9 @@ above and for layout checks during development).
 - Dark and light palettes with a document surface tuned separately from the chrome.
 - A filterable contents tree, an index pane with multi-select keywords, and `F1` keywords
   highlighted in green for context-sensitive help.
-- Drag and drop a package, folder or `.msha` anywhere in the window.
-- `ms-xhelp:///?Id=…`, relative links, `#anchors` and cross-package links resolve inside the
-  viewer; external URLs open in your browser.
+- Drag and drop a package, `.chm`, folder or `.msha` anywhere in the window.
+- `ms-xhelp:///?Id=…`, `ms-its:` / `mk:@MSITStore:` links, relative links, `#anchors` and
+  cross-package links resolve inside the viewer; external URLs open in your browser.
 
 ### Search
 
@@ -185,11 +187,12 @@ own application.
 | Input | Status |
 | --- | --- |
 | `.mshc` (DocMounter, Help Viewer 1.x/2.x, SHFB/Sandcastle output) | full support |
+| `.chm` (Compiled HTML Help, Help 1.x) | read-only: topics, TOC, index, search, assets, links |
 | Content-store folder (`ContentStore/<LOCALE>`) | full support, merged into one library |
 | `.msha` setup document | package discovery |
 | `.mshi` / `.metadata` sidecars | best effort |
 | `.cab` content packages | detected with an actionable error (extract first) |
-| CHS/HxS (`*.hxs`), CHM | roadmap |
+| HxS (`*.hxs`) | roadmap |
 
 The renderer understands the legacy markup that real packages contain: `div.pageHeader` /
 `pageFooter`, `table.titleTable`, `div.codeSnippetContainer` with `ChangeTab`, Sandcastle
@@ -200,21 +203,26 @@ in [`docs/DESIGN.md`](docs/DESIGN.md) §2.3.
 ## Architecture
 
 ```text
-crates/lucid-mshc    format core: zip/OPC → packages → topics, TOC, keywords, assets, content sets
+crates/lucid-mshc    format core: zip/OPC and CHM → packages → topics, TOC, keywords, assets
 crates/lucid-search  inverted index + BM25F, query language, snippets, suggestions, persistence
 crates/lucid-forge   the packer (library + CLI) and the demo-package generator
 crates/lucid         the application: egui GUI + headless CLI
 docs/DESIGN.md       format algorithm, frozen APIs, UX specification
-SPEC.md              requirements and v1.0 acceptance criteria
-testdata/            demo-help.mshc — committed, self-authored sample package
+SPEC.md              requirements and v1.1 acceptance criteria
+testdata/            demo-help.mshc / demo-help.chm — committed, self-authored samples
 ```
 
 | Crate | Role |
 | --- | --- |
-| `lucid-mshc` | MSHC parsing: packages, content sets, TOC/index reconstruction, assets |
+| `lucid-mshc` | MSHC/CHM parsing: packages, content sets, TOC/index reconstruction, assets |
 | `lucid-search` | ranked, instant full-text search: BM25F, phrases, prefixes, fuzzy, snippets |
 | `lucid-forge` | MSHC packer and validator; builds valid OPC + `HelpContentSet` packages |
 | `lucid` | native egui application, reader, panes and the headless command line |
+
+CHM decoding uses a vendored copy of [`libchm`](https://crates.io/crates/libchm) 0.3.0 (MIT);
+the vendored reader lives in `crates/lucid-mshc/src/chm/vendor/` and its license is kept
+alongside the code. Only MSRV substitutions were applied, so the crate stays compatible with
+Rust 1.86.
 
 ## Development
 
@@ -247,8 +255,8 @@ The banner, app icon and screenshots are described in [`assets/README.md`](asset
 Release archives are built from tags:
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.1.0
+git push origin v1.1.0
 ```
 
 GitHub Actions publishes Linux x86_64, macOS x86_64/arm64 and Windows x86_64 archives
@@ -262,9 +270,9 @@ archives plus checksums. Both workflows refuse a tag whose version differs from
 ## Roadmap
 
 In-process `.cab` support, syntax highlighting for code snippets, a CSS subset, PDF/EPUB
-export, optional semantic search, CHM/HxS import and a GUI authoring mode. The order and the
-reasoning live in [`docs/DESIGN.md`](docs/DESIGN.md) §7; the acceptance criteria are in
-[`SPEC.md`](SPEC.md).
+export, optional semantic search, CHS/HxS (`.hxs`) import and a GUI authoring mode. The order
+and the reasoning live in [`docs/DESIGN.md`](docs/DESIGN.md) §7; the acceptance criteria are
+in [`SPEC.md`](SPEC.md).
 
 ## Support Lucid
 

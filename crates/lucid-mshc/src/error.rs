@@ -23,6 +23,9 @@ pub enum Error {
 extract it first, e.g. `cabextract {name}` and open the resulting .mshc files")]
     Cab { path: PathBuf, name: String },
 
+    #[error("`{path}` is not a readable CHM archive: {reason}")]
+    Chm { path: PathBuf, reason: String },
+
     #[error("`{path}` is not a help package: {reason}")]
     NotPackage { path: PathBuf, reason: String },
 
@@ -53,6 +56,14 @@ impl Error {
         Error::Zip {
             path: path.into(),
             source,
+        }
+    }
+
+    /// Convenience constructor for CHM errors.
+    pub fn chm(path: impl Into<PathBuf>, reason: impl Into<String>) -> Self {
+        Error::Chm {
+            path: path.into(),
+            reason: reason.into(),
         }
     }
 

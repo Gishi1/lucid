@@ -188,7 +188,12 @@ fn export_many(
                 return None;
             }
             let lower = raw.to_ascii_lowercase();
-            if lower.starts_with("ms-xhelp:") || lower.starts_with("ms-help:") {
+            if lower.starts_with("ms-xhelp:")
+                || lower.starts_with("ms-help:")
+                || lower.starts_with("ms-its:")
+                || lower.starts_with("ms-itss:")
+                || lower.starts_with("mk:@msitstore:")
+            {
                 // Rewrite to the exported topic when it is part of this export.
                 if let LinkTarget::Topic(target) = set.resolve(*key, raw) {
                     if let Some(name) = topic_names.get(&target) {

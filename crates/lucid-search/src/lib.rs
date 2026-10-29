@@ -9,7 +9,7 @@
 //!   (exact → prefix → fuzzy → spelling suggestions) so the user never sees a dead end.
 //! * **Honest snippets**: highlight ranges are character indices into the returned snippet,
 //!   so a GUI can highlight them without re-searching.
-//! * **Content-blind**: it knows about documents and fields, nothing about MSHC.
+//! * **Content-blind**: it knows about documents and fields, nothing about help formats.
 //!
 //! ```
 //! use lucid_search::{DocInput, IndexBuilder, SearchOptions};

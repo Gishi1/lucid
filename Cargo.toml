@@ -8,20 +8,22 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 rust-version = "1.86"
 license = "MIT"
 authors = ["gishi"]
 repository = "https://github.com/gishi/lucid"
 homepage = "https://github.com/gishi/lucid"
-description = "Lucid — a fast, modern viewer for Microsoft Help Container (.mshc) documentation"
+description = "Lucid — a fast, modern viewer for MSHC (Microsoft Help Container) and CHM (Compiled HTML Help) documentation"
 
 [workspace.dependencies]
 # --- core format handling -------------------------------------------------
 # Pinned deliberately: the toolchain here is rustc 1.86, and newer zip/image releases pull
 # `zopfli`/`icu_*` which require 1.88+. `cargo tree` is the source of truth if this drifts.
 zip = { version = "=1.1.4", default-features = false, features = ["deflate"] }
+# The vendored CHM reader uses the same bitflags major as the rest of the graph.
+bitflags = "2.13"
 roxmltree = "0.20"
 scraper = "0.19"
 serde = { version = "1.0", features = ["derive"] }

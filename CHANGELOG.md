@@ -4,7 +4,20 @@ All notable changes to Lucid are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] — 2026-10-28
+
+### Added
+
+- Read-only CHM (Compiled HTML Help, Help 1.x) support: opens `.chm` archives directly,
+  decodes `#SYSTEM` metadata, the HHC contents tree and the HHK keyword index, and exposes
+  topics, assets, search and `ms-its:` / `mk:@MSITStore:` links like an MSHC package.
+- Self-authored `testdata/demo-help.chm` fixture plus end-to-end CHM tests (metadata,
+  TOC, index, links, assets, error handling).
+
+### Notes
+
+- CHM decoding uses a vendored copy of `libchm` 0.3.0 (MIT) with MSRV substitutions for
+  Rust 1.86. CHM support is read-only; Lucid does not compile `.chm` files.
 
 ## [1.0.0] — 2026-10-27
 

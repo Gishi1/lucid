@@ -1,5 +1,5 @@
 //! A content set: one package, or several merged (a Help Library content-store folder, a
-//! `.msha` setup document, a directory of vendor packages).
+//! `.msha` setup document, a directory of vendor packages, a single `.chm` archive).
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -19,7 +19,9 @@ pub const FORMAT_VERSION: u32 = 2;
 pub enum SourceKind {
     /// A single `.mshc` file.
     Package,
-    /// A folder containing one or more `.mshc` files (content store).
+    /// A single `.chm` archive.
+    Chm,
+    /// A folder containing one or more packages (content store).
     Folder,
     /// A `.msha` setup document listing packages.
     Setup,
@@ -29,6 +31,7 @@ impl SourceKind {
     pub fn label(self) -> &'static str {
         match self {
             SourceKind::Package => "package",
+            SourceKind::Chm => "CHM archive",
             SourceKind::Folder => "content set",
             SourceKind::Setup => "content set (setup document)",
         }
@@ -93,7 +96,7 @@ impl std::fmt::Debug for DocSet {
 }
 
 impl DocSet {
-    /// Open a package, a folder of packages, or a `.msha` setup document.
+    /// Open a package, a `.chm` archive, a folder of packages, or a `.msha` setup document.
     pub fn open(path: &Path, progress: &mut dyn FnMut(Progress)) -> Result<DocSet> {
         let mut warnings: Vec<String> = Vec::new();
         let (kind, package_paths) = discover(path, progress, &mut warnings)?;
@@ -410,6 +413,35 @@ impl DocSet {
             }
             return LinkTarget::Missing(raw.to_owned());
         }
+        // CHM links. `ms-its:book.chm::/topic.htm#anchor` and
+        // `mk:@MSITStore:C:\path\book.chm::/topic.htm` both name a topic inside a CHM;
+        // when the book is the one being read, resolve it locally (multi-book link
+        // resolution is not supported, but the common case works).
+        if lower.starts_with("ms-its:")
+            || lower.starts_with("ms-itss:")
+            || lower.starts_with("mk:@msitstore:")
+            || lower.starts_with("ms-its ")
+        {
+            if let Some(reference) = extract_chm_reference(raw) {
+                let (path, fragment) = split_fragment(&reference);
+                if !path.trim().is_empty() {
+                    if let Some(key) = self.resolve_topic_path(from, path) {
+                        return match fragment {
+                            Some(anchor) if !anchor.is_empty() => {
+                                LinkTarget::Anchor(key, anchor.to_owned())
+                            }
+                            _ => LinkTarget::Topic(key),
+                        };
+                    }
+                }
+                if let Some(id) = extract_id(raw) {
+                    if let Some(key) = self.find_by_id(&id).or_else(|| self.find_by_f1(&id)) {
+                        return LinkTarget::Topic(key);
+                    }
+                }
+            }
+            return LinkTarget::Missing(raw.to_owned());
+        }
         if is_external(raw) {
             return LinkTarget::External(raw.to_owned());
         }
@@ -629,7 +661,7 @@ fn discover(
                 continue;
             }
             match extension(&child).as_str() {
-                "mshc" => packages.push(child),
+                "mshc" | "chm" => packages.push(child),
                 "msha" | "mshi" => setups.push(child),
                 _ => {}
             }
@@ -651,7 +683,7 @@ fn discover(
         packages.dedup();
         if packages.is_empty() {
             return Err(Error::NotFound(format!(
-                "no .mshc packages in {}",
+                "no .mshc packages or .chm archives in {}",
                 path.display()
             )));
         }
@@ -664,6 +696,7 @@ fn discover(
     } else {
         match extension(path).as_str() {
             "mshc" => Ok((SourceKind::Package, vec![path.to_path_buf()])),
+            "chm" => Ok((SourceKind::Chm, vec![path.to_path_buf()])),
             "msha" | "mshi" => {
                 progress(Progress::new(Stage::Discovering, 0, 0, path.display().to_string()));
                 let mut packages = setup_package_paths(path)?;
@@ -676,7 +709,15 @@ fn discover(
                 }
                 Ok((SourceKind::Setup, packages))
             }
-            _ => Ok((SourceKind::Package, vec![path.to_path_buf()])),
+            // Unknown extension: let the magic bytes decide (a rename must not break it).
+            _ => {
+                let kind = if crate::chm::is_chm(path) {
+                    SourceKind::Chm
+                } else {
+                    SourceKind::Package
+                };
+                Ok((kind, vec![path.to_path_buf()]))
+            }
         }
     }
 }
@@ -783,6 +824,21 @@ fn extract_id(href: &str) -> Option<String> {
     }
 }
 
+/// Pull the topic reference out of a CHM link.
+///
+/// Handles `ms-its:book.chm::/topic.htm`, `ms-itss:…`, `mk:@MSITStore:C:\dir\book.chm::/topic.htm`
+/// and the `hh.exe`-style `book.chm::/topic.htm`. The book name is dropped: Lucid resolves
+/// the reference against the packages of the open content set.
+fn extract_chm_reference(href: &str) -> Option<String> {
+    let marker = href.find("::")?;
+    let rest = href[marker + 2..].trim();
+    let rest = rest.trim_start_matches(['/', '\\']);
+    if rest.is_empty() {
+        return None;
+    }
+    Some(rest.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -824,5 +880,29 @@ mod tests {
         let mut progress = |_p: Progress| {};
         let err = DocSet::open(Path::new("/nope/nowhere"), &mut progress).unwrap_err();
         assert!(matches!(err, Error::Io { .. }));
+    }
+
+    #[test]
+    fn chm_reference_extraction() {
+        assert_eq!(
+            extract_chm_reference("ms-its:demo.chm::/guides/install.htm").as_deref(),
+            Some("guides/install.htm")
+        );
+        assert_eq!(
+            extract_chm_reference("mk:@MSITStore:C:\\docs\\demo.chm::/index.htm#top").as_deref(),
+            Some("index.htm#top")
+        );
+        assert_eq!(
+            extract_chm_reference("book.chm::/a.htm").as_deref(),
+            Some("a.htm")
+        );
+        assert_eq!(extract_chm_reference("ms-its:demo.chm"), None);
+        assert_eq!(extract_chm_reference("plain.htm"), None);
+    }
+
+    #[test]
+    fn chm_links_are_not_external() {
+        assert!(!is_external("ms-its:demo.chm::/a.htm"));
+        assert!(!is_external("mk:@MSITStore:C:\\x\\demo.chm::/a.htm"));
     }
 }

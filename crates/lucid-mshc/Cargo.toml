@@ -7,10 +7,11 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "MSHC (Microsoft Help Container) parsing: packages, content sets, TOC/index reconstruction, assets"
+description = "Help container parsing: MSHC packages, CHM archives, content sets, TOC/index reconstruction, assets"
 
 [dependencies]
 zip.workspace = true
+bitflags.workspace = true
 roxmltree.workspace = true
 serde.workspace = true
 thiserror.workspace = true

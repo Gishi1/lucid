@@ -1,8 +1,9 @@
-//! Lucid — a fast, modern viewer for Microsoft Help Container (`.mshc`) documentation.
+//! Lucid — a fast, modern viewer for MSHC (Microsoft Help Container) and CHM (Compiled
+//! HTML Help) documentation.
 //!
 //! One binary, two faces:
 //!
-//! * the GUI (`lucid path/to/book.mshc`), and
+//! * the GUI (`lucid path/to/book.mshc` or `lucid book.chm`), and
 //! * the headless commands used for automation, CI and context-sensitive help
 //!   (`lucid search`, `lucid info`, `lucid toc`, `lucid extract`, `lucid demo`).
 //!

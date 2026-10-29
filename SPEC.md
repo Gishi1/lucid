@@ -1,6 +1,6 @@
-# SPEC — Lucid, a modern MSHC (Microsoft Help Container) viewer & packer
+# SPEC — Lucid, a modern MSHC (Microsoft Help Container) & CHM viewer and packer
 
-Status: **released (v1.0)** · Owner: gishi · Deep technical reference: [`docs/DESIGN.md`](docs/DESIGN.md)
+Status: **released (v1.1)** · Owner: gishi · Deep technical reference: [`docs/DESIGN.md`](docs/DESIGN.md)
 
 ## 1. Problem
 
@@ -19,8 +19,8 @@ unreadable on Linux/macOS, and even on Windows the reading/search experience is 
 
 Ship **Lucid**: a single-binary, cross-platform, native Rust application that
 
-1. opens any `.mshc` package (and whole content sets) without Visual Studio, .NET, or a
-   browser engine;
+1. opens any `.mshc` package, `.chm` archive (and whole content sets) without Visual Studio,
+   .NET, or a browser engine;
 2. presents it with a modern GUI (Contents / Index / Search / Favorites + tabbed topic
    browser);
 3. searches dramatically better than Help Viewer 2.x (instant, ranked, phrase/prefix/
@@ -41,9 +41,10 @@ Ship **Lucid**: a single-binary, cross-platform, native Rust application that
 ## 4. Functional requirements
 
 ### 4.1 Opening content
-- **FR-1.1** Open a single `.mshc` file (path argument, GUI open dialog, drag & drop).
-- **FR-1.2** Open a directory as a content set: every `*.mshc` inside is loaded and merged
-  (TOC subtrees per package, keywords merged, search across all).
+- **FR-1.1** Open a single `.mshc` file or `.chm` archive (path argument, GUI open dialog,
+  drag & drop).
+- **FR-1.2** Open a directory as a content set: every `*.mshc` / `*.chm` inside is loaded and
+  merged (TOC subtrees per package, keywords merged, search across all).
 - **FR-1.3** Open a `.msha` *setup* document: read its `div.package` entries and load the
   referenced `.mshc` packages relative to it.
 - **FR-1.4** Detect `.cab` packages and fail with an actionable message (no silent zip error).
@@ -52,6 +53,10 @@ Ship **Lucid**: a single-binary, cross-platform, native Rust application that
   duplicate ids, topics without `TocParent`.
 - **FR-1.6** Report load progress; the UI must stay responsive for large books.
 - **FR-1.7** Recent files list (last 10) with one-click reopen.
+- **FR-1.8** CHM is read-only: decode the ITSS/ITSF container and LZX `MSCompressed` sections,
+  read `#SYSTEM` metadata (title, locale, contents/index files, default topic), build the TOC
+  from HHC and the keyword index from HHK, and expose topics/assets like an MSHC package.
+  CHM compilation is not supported.
 
 ### 4.2 Navigation
 - **FR-2.1** Contents pane: hierarchical TOC built from the manifest when present, else
@@ -87,8 +92,9 @@ Ship **Lucid**: a single-binary, cross-platform, native Rust application that
 - **FR-4.2** Render MSHC behaviours: `CollapsibleArea`, `CodeSnippet` (with copy button and
   language tabs), `LanguageSpecificText`, `div.title`, `div.alert` + `span.label`,
   `Inherited Member`.
-- **FR-4.3** Resolve `ms-xhelp:///?Id=<id>` links, relative links, `#anchors`, and links
-  into sibling packages; open external `http(s)` links in the system browser.
+- **FR-4.3** Resolve `ms-xhelp:///?Id=<id>` links, `ms-its:` / `mk:@MSITStore:` CHM links,
+  relative links, `#anchors`, and links into sibling packages; open external `http(s)` links
+  in the system browser.
 - **FR-4.4** Images are loaded from package assets case-insensitively and cached in memory.
 - **FR-4.5** Zoom (Ctrl+±/Ctrl+0/Ctrl+scroll) and adjustable UI font size; dark and light
   themes; the choice persists.
@@ -130,18 +136,19 @@ Ship **Lucid**: a single-binary, cross-platform, native Rust application that
 - **NFR-7** Every parser rule is covered by a test built on generated fixtures (no
   third-party content is redistributed).
 
-## 6. Compatibility matrix (v1.0)
+## 6. Compatibility matrix (v1.1)
 
 | Source | Status |
 | --- | --- |
 | DocMounter / 10Tec-generated `.mshc` | Supported (meta-tag + manifest TOC, assets, keywords) |
 | Visual Studio Help Viewer 1.0/2.x `.mshc` | Supported (incl. branding-package absence) |
 | SHFB / Sandcastle `.mshc` output | Supported (same metadata contract) |
+| Compiled HTML Help (`*.chm`, Help 1.x) | Supported read-only: topics, HHC TOC, HHK index, assets, links |
 | Content-store folder (`ContentStore/<LOCALE>`) | Supported |
 | `.msha` setup document | Supported (package discovery) |
 | `.cab` content packages | Detected, clear error; extraction roadmap |
 | `.mshi` / `.metadata` sidecars | Read for package metadata (best effort) |
-| CHM (`*.chm`), HxS (`*.hxs`) | Out of scope for v1.0 (roadmap) |
+| HxS (`*.hxs`) | Out of scope for v1.1 (roadmap) |
 
 ## 7. Persistence & data locations
 
@@ -154,7 +161,7 @@ Ship **Lucid**: a single-binary, cross-platform, native Rust application that
 Fingerprint = sorted package paths + sizes + mtimes + index format version; any change
 forces a rebuild (silently, in the background).
 
-## 8. Acceptance criteria (v1.0 "done")
+## 8. Acceptance criteria (v1.1 "done")
 
 1. `cargo build --release` succeeds on Linux with rustc 1.86 and the X11/Wayland/OpenGL
    development headers listed in the README.
@@ -166,7 +173,8 @@ forces a rebuild (silently, in the background).
 3. `lucid demo testdata/demo-help.mshc && lucid info testdata/demo-help.mshc` shows the
    expected topic/TOC/keyword counts; `lucid toc` prints the tree; `lucid search
    testdata/demo-help.mshc "phrase search"` returns the search topic with a snippet
-   containing the terms.
+   containing the terms. The same `info` / `toc` / `search` commands work on
+   `testdata/demo-help.chm`.
 4. `lucid testdata/demo-help.mshc` opens a window with panes as in DESIGN §6; TOC
    navigation, search-as-you-type with highlighting, keyword index, bookmarks, tabs,
    outline, find-in-topic and the theme toggle all work by mouse and keyboard.
@@ -178,7 +186,7 @@ forces a rebuild (silently, in the background).
    hit) and the second open is measurably faster.
 7. README documents install, GUI usage, all keyboard shortcuts, CLI, and the format notes;
    `docs/DESIGN.md` stays the single source of truth for format decisions.
-8. Tagging `v1.0.0` produces release archives for Linux x86_64, macOS x86_64/arm64 and
+8. Tagging `v1.1.0` produces release archives for Linux x86_64, macOS x86_64/arm64 and
    Windows x86_64; each contains `lucid`, `lucid-forge`, `README.md`, `LICENSE` and
    `CHANGELOG.md`, and the tag matches the workspace version. GitLab publishes the same
    set from its package registry.
@@ -194,6 +202,10 @@ forces a rebuild (silently, in the background).
   (DESIGN §2.4). *Open question:* add a strict XSD once a real-world sample set is
   available.
 - **A-4** Semantics of `.mshi` files are undocumented; parsed best-effort, never required.
-- **A-5** License: MIT (see [`LICENSE`](LICENSE)).
+- **A-5** License: MIT (see [`LICENSE`](LICENSE)). The CHM decoder is a vendored copy of
+  `libchm` 0.3.0 (MIT); its license is kept in
+  `crates/lucid-mshc/src/chm/vendor/LICENSE.libchm`.
 - **A-6** Windows and macOS binaries are built by the release workflow; runtime testing is
   Linux-first. The code paths are platform-neutral (egui, no OS APIs).
+- **A-7** CHM support is deliberately read-only. Lucid does not compile `.chm` files; use
+  `lucid-forge` to author `.mshc` packages instead.
